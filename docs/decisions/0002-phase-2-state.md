@@ -15,3 +15,5 @@ Status: aprovado para implementação da Fase 2, 2026-11-04.
 ## Consequências e limites
 
 O núcleo depende de protocolos, sem importar SQLite. A CLI da Fase 2 valida e inspeciona, sem executar agentes. Corrupção, versão futura e divergência de plano impedem escrita e preservam os arquivos para diagnóstico. A restauração de backup é manual. Custos de sincronização e autoria não autenticada são riscos aceitos nesta fase.
+
+A inspeção da CLI abre um snapshot imutável somente quando não existe WAL pendente. Nessa condição, recusa a leitura com erro controlado; a reabertura/reconciliação operacional deve preceder nova inspeção. Isso evita criar WAL/SHM ou mostrar estado incompleto durante uma inspeção prometida como somente leitura.

@@ -1,4 +1,4 @@
-"""User-facing CLI; no agent execution commands exist in phase 1."""
+"""User-facing CLI; no agent execution commands exist in phases 1 or 2."""
 
 import argparse
 from pathlib import Path

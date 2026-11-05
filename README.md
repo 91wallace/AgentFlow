@@ -1,6 +1,6 @@
 # AgentFlow
 
-AgentFlow é um projeto de orquestrador híbrido de desenvolvimento de software. O núcleo e a CLI rodam localmente. Fases futuras acrescentarão planejamento de tarefas, estado SQLite, execução de agentes local ou em Docker, validação, recuperação e checkpoints Git.
+AgentFlow é um projeto de orquestrador híbrido de desenvolvimento de software. O núcleo e a CLI rodam localmente. Planejamento de tarefas e estado SQLite são entregas da Fase 2; fases futuras acrescentarão execução de agentes local ou em Docker, validação automática e checkpoints Git.
 
 ## Estado atual: Fases 1 e 2 locais
 

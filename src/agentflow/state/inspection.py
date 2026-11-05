@@ -12,9 +12,13 @@ from .contracts import ConflictError, IntegrityError, TaskState
 def inspect_state(path: Path, plan: Plan) -> tuple[TaskState, ...]:
     if not path.is_file():
         raise IntegrityError(f"estado inexistente: {path}")
-    uri = path.resolve().as_uri() + "?mode=ro"
+    if path.with_name(path.name + "-wal").exists():
+        raise IntegrityError("WAL pendente; inspeção somente leitura indisponível até reconciliação")
+    uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
     try:
         with closing(sqlite3.connect(uri, uri=True)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
             if db.execute("PRAGMA user_version").fetchone()[0] != 1:
                 raise IntegrityError("versão SQLite incompatível")
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":

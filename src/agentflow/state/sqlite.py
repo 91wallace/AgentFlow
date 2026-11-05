@@ -50,9 +50,9 @@ class SQLiteStore:
                 raise IntegrityError(f"versão SQLite futura: {version}")
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.execute("PRAGMA foreign_keys=ON")
+            self._migrate()
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=FULL")
-            self._migrate()
             self.check_integrity()
         except (sqlite3.DatabaseError, OSError, IntegrityError) as exc:
             if hasattr(self, "db"):
@@ -184,16 +184,20 @@ class SQLiteStore:
                                 "plan import creation", f"plan:{plan_revision}:{task.id}", "plan_import")
 
             for task in plan.tasks:
-                row = db.execute("SELECT definition_revision,revalidation_required FROM tasks WHERE project_id=? AND task_id=?", (project, task.id)).fetchone()
+                row = db.execute("SELECT definition_revision,revalidation_required,status FROM tasks WHERE project_id=? AND task_id=?", (project, task.id)).fetchone()
                 if row[1]:
                     continue
                 for dep in task.depends_on:
                     db.execute("INSERT OR IGNORE INTO task_dependencies VALUES(?,?,?)", (project, task.id, dep))
-                if task.depends_on and all(db.execute("SELECT status FROM tasks WHERE project_id=? AND task_id=?", (project, dep)).fetchone()[0] == "completed" for dep in task.depends_on):
-                    db.execute("UPDATE tasks SET status='ready' WHERE project_id=? AND task_id=? AND status='pending'", (project, task.id))
-                    if db.execute("SELECT changes()").fetchone()[0]:
-                        self._event(db, project, task.id, row[0], "pending", "ready",
-                                    "plan import dependencies complete", f"plan:{plan_revision}:{task.id}", "plan_import")
+                dependencies_done = self._dependencies_done(db, project, task.id)
+                if row[2] == "pending" and dependencies_done:
+                    db.execute("UPDATE tasks SET status='ready',revision=revision+1,updated_at=? WHERE project_id=? AND task_id=?", (now(), project, task.id))
+                    self._event(db, project, task.id, row[0], "pending", "ready",
+                                "plan import dependencies complete", f"plan:{plan_revision}:{task.id}", "plan_import")
+                elif row[2] == "ready" and not dependencies_done:
+                    db.execute("UPDATE tasks SET status='pending',revision=revision+1,updated_at=? WHERE project_id=? AND task_id=?", (now(), project, task.id))
+                    self._event(db, project, task.id, row[0], "ready", "pending",
+                                "plan import dependency changed", f"plan:{plan_revision}:{task.id}", "plan_import")
 
     def list_tasks(self) -> tuple[TaskState, ...]:
         return tuple(TaskState(*row) for row in self.db.execute(
@@ -209,6 +213,11 @@ class SQLiteStore:
                 raise ConflictError("operation_id reutilizado com parâmetros diferentes")
             return row[1], row[2]
         return None
+
+    @staticmethod
+    def _external_operation_id(operation_id: str) -> None:
+        if operation_id.startswith("recovery:"):
+            raise ConflictError("operation_id reservado para recuperação")
 
     def _record_operation(self, db: sqlite3.Connection, operation_id: str, request: object,
                           result_type: str, result_id: int, result_snapshot: str = "") -> None:
@@ -238,6 +247,7 @@ class SQLiteStore:
         return not db.execute("SELECT 1 FROM task_dependencies d JOIN tasks t ON (d.project_id,d.depends_on_id)=(t.project_id,t.task_id) WHERE d.project_id=? AND d.task_id=? AND (t.status!='completed' OR t.revalidation_required=1) LIMIT 1", (project, task_id)).fetchone()
 
     def revalidate(self, task_id: str, operation_id: str, author: str, reason: str) -> TaskState:
+        self._external_operation_id(operation_id)
         if not author.strip() or not reason.strip():
             raise TransitionError("revalidação exige autor e justificativa")
         with self.transaction() as db:
@@ -265,6 +275,7 @@ class SQLiteStore:
             return result
 
     def add_evidence(self, item: EvidenceInput) -> int:
+        self._external_operation_id(item.operation_id)
         with self.transaction() as db:
             project = self._project_id()
             request = {"verb": "evidence", "project": project, **asdict(item)}
@@ -299,6 +310,7 @@ class SQLiteStore:
             return evidence_id
 
     def transition(self, command: Transition) -> TaskState:
+        self._external_operation_id(command.operation_id)
         allowed = {"pending": {"ready", "blocked"}, "ready": {"reserved", "blocked"},
                    "reserved": {"completed", "failed", "ready"}, "failed": {"ready", "blocked"},
                    "blocked": {"pending", "ready"}, "completed": set()}
@@ -367,6 +379,8 @@ class SQLiteStore:
         with self.transaction() as db:
             reservations = db.execute("SELECT task_id,definition_revision,status,reservation_operation FROM tasks WHERE project_id=? AND status='reserved' ORDER BY task_id", (project,)).fetchall()
             for task_id, definition_revision, before, reservation_id in reservations:
+                if not reservation_id:
+                    raise IntegrityError(f"reserva sem operation_id: {task_id}")
                 operation_id = f"recovery:{reservation_id}"
                 request = {"verb": "recover", "project": project, "task_id": task_id,
                            "reservation_operation": reservation_id}

@@ -1,7 +1,7 @@
 import pytest
 
 from agentflow.planning import load_plan
-from agentflow.state import ConflictError
+from agentflow.state import ConflictError, Transition
 from agentflow.state.sqlite import SQLiteStore
 from test_planning import SPEC, TASKS, files
 
@@ -57,3 +57,19 @@ def test_unstarted_revision_change_is_audited_without_forced_revalidation(tmp_pa
         assert first.definition_revision == 2
         assert not first.revalidation_required
         assert store.db.execute("SELECT count(*) FROM task_events WHERE task_id='first'").fetchone()[0] == 2
+
+
+def test_dependent_is_demoted_when_completed_prerequisite_changes(tmp_path):
+    directory = files(tmp_path / "plan")
+    with SQLiteStore(tmp_path / "state.sqlite3") as store:
+        store.import_plan(load_plan(directory))
+        store.transition(Transition("first", "reserved", "reserve", 0, owner="worker"))
+        store.transition(Transition("first", "completed", "complete", 1,
+                                    exception_author="reviewer", exception_reason="manual waiver"))
+        assert store.list_tasks()[1].status == "ready"
+        (directory / "tasks.toml").write_text(TASKS.replace("First works", "First works better"), encoding="utf-8")
+        store.import_plan(load_plan(directory))
+        first, second = store.list_tasks()
+        assert first.revalidation_required
+        assert second.status == "pending"
+        assert store.db.execute("SELECT count(*) FROM task_events WHERE task_id='second' AND from_status='ready' AND to_status='pending'").fetchone()[0] == 1

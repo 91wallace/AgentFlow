@@ -21,8 +21,26 @@ def test_plan_and_state_inspection_are_read_only(tmp_path, capsys):
     assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
     with SQLiteStore(directory / "state.sqlite3") as store:
         store.import_plan(load_plan(directory))
+    before_state = {path.name: path.read_bytes() for path in directory.iterdir()}
     assert main(["state", "--path", str(root)]) == 0
     assert "first: ready" in capsys.readouterr().out
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before_state
+
+
+def test_state_inspection_rejects_active_wal_without_writing(tmp_path, capsys):
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    directory = root / ".agentflow"
+    directory.mkdir()
+    (directory / "spec.toml").write_text(SPEC, encoding="utf-8")
+    (directory / "tasks.toml").write_text(TASKS, encoding="utf-8")
+    with SQLiteStore(directory / "state.sqlite3") as store:
+        store.import_plan(load_plan(directory))
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        assert main(["state", "--path", str(root)]) == 2
+        assert "WAL pendente" in capsys.readouterr().err
+        assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
 
 
 def test_only_two_toml_files_are_git_visible(tmp_path):

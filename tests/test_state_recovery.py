@@ -53,3 +53,15 @@ def test_corrupt_file_is_preserved(tmp_path):
     with pytest.raises(IntegrityError):
         SQLiteStore(path)
     assert path.read_bytes() == before
+
+
+def test_external_id_cannot_block_recovery(tmp_path):
+    plan = load_plan(files(tmp_path / "plan"))
+    path = tmp_path / "state.sqlite3"
+    with SQLiteStore(path) as store:
+        store.import_plan(plan)
+        with pytest.raises(ConflictError, match="reservado"):
+            store.transition(Transition("first", "reserved", "recovery:reserve", 0, owner="worker"))
+        store.transition(Transition("first", "reserved", "reserve", 0, owner="worker"))
+    with SQLiteStore(path) as store:
+        assert store.reopen(plan) == ("first",)

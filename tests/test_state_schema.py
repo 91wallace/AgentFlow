@@ -32,13 +32,15 @@ def test_future_version_is_rejected_without_change(tmp_path):
 
 def test_backup_failure_prevents_migration(tmp_path, monkeypatch):
     path = tmp_path / "state.sqlite3"
-    with sqlite3.connect(path):
-        pass
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA application_id=1234")
+    before = path.read_bytes()
     monkeypatch.setattr(SQLiteStore, "_backup", lambda self: (_ for _ in ()).throw(IntegrityError("backup falhou")))
     with pytest.raises(IntegrityError, match="backup falhou"):
         SQLiteStore(path)
     with sqlite3.connect(path) as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+    assert path.read_bytes() == before
 
 
 def test_migration_failure_rolls_back(tmp_path, monkeypatch):
@@ -60,8 +62,8 @@ def test_foreign_keys_reject_orphan_rows(tmp_path):
 
 def test_migration_backup_is_consistent_and_preserves_existing_backup(tmp_path):
     path = tmp_path / "state.sqlite3"
-    with sqlite3.connect(path):
-        pass
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA application_id=1234")
     existing = tmp_path / "state.sqlite3.bak"
     existing.write_bytes(b"preserve")
     with SQLiteStore(path):
