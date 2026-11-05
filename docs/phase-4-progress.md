@@ -13,7 +13,7 @@ Branch local: `feat/git-recovery-phase-4`, baseada em `main` após o merge da Fa
 | F4-07 | Concluída | Index temporário isolado; blobs sem filtros; `update-index --index-info -z`, `commit-tree` e CAS `update-ref`; paths revalidados antes do staging/commit; OID/parent/tree/ref/trailer/paths verificados. Repetição idempotente; regressão TOCTOU bloqueia sem mover HEAD. |
 | F4-08 | Implementada localmente | Reconciliação só observa fatos Git; checkpoint único identificado é persistido sem criar segundo commit. Locks abandonados tornam operações `unknown`; verificação explícita de workspace limpo também é idempotente e recuperável. |
 | F4-09 | Implementada localmente | Execução de tarefa com `versioned_paths` cria/reusa worktree própria. CLI expõe `workspaces`, `git-recover`, `checkpoint`, `verify-no-changes` e `complete`; conclusão verifica tentativa, validação, evidências da revisão e checkpoint/resultado limpo atual. |
-| F4-10 | CI do commit de implementação aprovada; commit documental em validação | Suíte completa local aprovada em Windows/Python 3.13; instalação editável e wheel com build isolation aprovadas, incluindo smoke test em venv limpo. Os três jobs Ubuntu passaram para o commit de implementação `ccb94de`; o commit de registro desta homologação ainda precisa da CI final. |
+| F4-10 | Homologação técnica aprovada nos commits de código e registro | Suíte completa local aprovada em Windows/Python 3.13; instalação editável e wheel com build isolation aprovadas, incluindo smoke test em venv limpo. Os jobs Ubuntu passaram para os commits de implementação `ccb94de` e registro `bf5a01a`; o estado do HEAD corrente é acompanhado pelos checks do PR. |
 
 ## Evidência incremental
 
@@ -34,5 +34,6 @@ Branch local: `feat/git-recovery-phase-4`, baseada em `main` após o merge da Fa
 - Commit de implementação: `ccb94de0899962a6cfcdf0793fb1888fe8735eb8` (`feat: add local Git workspaces and checkpoints`), 27 arquivos Fase 4; alterações locais preexistentes e protótipo legado ficaram fora.
 - Branch enviada: `feat/git-recovery-phase-4`; sem merge.
 - CI Actions em Ubuntu, execução push `42039333340` e execução PR `42039384664`: `test (3.11)` passou, `test (3.12)` passou, `test (3.13)` passou em ambas as execuções.
+- CI Actions em Ubuntu para o commit documental `bf5a01a7eea91f3b570cfcd66c58ef855ef6a0e5`, execução push `42039630387` e execução PR `42039639843`: os três jobs passaram em ambas as execuções.
 - Instalação com build isolation corrigiu a falha anterior de `setuptools.build_meta`; o backend declarado foi usado temporariamente no ambiente de build. Nenhuma dependência de runtime/teste foi adicionada ou alterada.
 - O pacote wheel instalado em venv Python 3.13 limpo importou de `site-packages`; `agentflow --version` passou. O hash da wheel consta acima.
