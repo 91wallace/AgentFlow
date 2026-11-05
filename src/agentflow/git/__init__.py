@@ -1,0 +1,1 @@
+"""Git checkpoints (future phase)."""

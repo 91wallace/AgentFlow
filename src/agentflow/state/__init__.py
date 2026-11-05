@@ -1,0 +1,1 @@
+"""Operational persistence (future phase)."""
