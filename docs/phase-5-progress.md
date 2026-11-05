@@ -17,7 +17,7 @@ Base reconciliada: `HEAD` e `git merge-base HEAD origin/main` são ambos `8ec623
 | F5-07 | Concluída localmente | Runtime local shell-free valida SHA-256/versão, env mínima, redige e limita logs; timeout/cancelamento preservam temporário se término da árvore não é comprovado. Docker opt-in exige imagem local por digest, inspeciona HostConfig/mounts e fornece capabilities `supported` em preflight, `enforced` após inspeção da execução. StructuredGateValidator exige relatório `declared` vinculado a gate/revisão/snapshot e cobertura. 13 testes de runtime/validator passaram (inclui 3 testes com engine Docker simulado); CLI Docker não instalado, sem alegação de validação contra daemon real. |
 | F5-08 | Concluída localmente | `record_verified_gate_evidence` só grava quando run+gate `passed`, checkpoint e snapshot verificados, revisão vigente e critério associado. Evidência append-only contém os digests da definição/gate/validator/snapshot; idempotência testada e falhas/inconclusões não promovidas. 2 testes de evidência passaram; conclusão continua chamada separada F2. |
 | F5-09 | Concluída localmente | `ArtifactDeliveryService` valida proveniência do run/checkpoint/snapshot, builder, artefato único, SHA-256 e limites; reserva operação antes do builder/provider; autorização persistida por operação/destino/digest; delivery desligada por padrão; divergência ou resultado `unknown` não repete provider. 1 teste integrado cobriu proveniência, repetição idempotente, resultado unknown e artefato adulterado. |
-| F5-10 | Concluída localmente; CI remota pendente | CLI explícita `validate`, inspeção `validation-state` e limpeza explícita `validation-cleanup`; progresso, testes de retenção e documentação incluídos. Instalação editável isolada, smoke do CLI/import, suíte pytest completa (181 testes) e `git diff --check` aprovados. CI remota aguarda autorização posterior para publicar a branch. |
+| F5-10 | Homologada localmente e CI aprovada | CLI explícita `validate`, inspeção `validation-state` e limpeza explícita `validation-cleanup`; instalação e smoke, 181 testes e `git diff --check` aprovados. No PR #5, os workflows de push e pull request aprovaram Python 3.11, 3.12 e 3.13 no commit de código `ff10ef5ce495cb9466498ccaf5da7c61b729a357`; revisão final do PR permanece registrada no relatório de publicação. |
 
 ## Parâmetros normativos F5-01
 
@@ -97,3 +97,12 @@ Adicionar evidência por tarefa após cada implementação e teste relevante. Fa
 - PR #5 executou o workflow `CI` em duplicidade (eventos `push` e `pull_request`). Os dois conjuntos falharam nos três jobs Python 3.11, 3.12 e 3.13 no teste `test_local_runtime_bounds_logs_and_hashes_the_full_stream`.
 - Os logs dos jobs mostraram que o coletor contou os bytes reais no Linux (`200001`), enquanto a expectativa do teste codificava CRLF (`200002`). A diferença era somente a newline de `print`; não houve defeito no limite nem no digest do stream.
 - Regressão corrigida em `tests/test_phase5_runtime.py`: expectativa agora usa `os.linesep`, mantendo validação exata de tamanho e SHA-256 sob Windows/Linux. O teste focado passou localmente (1 teste) e a suíte completa pós-correção passou (181 testes em 222,09 s). Novo commit e nova CI serão publicados antes de concluir a homologação.
+
+### Homologação remota
+
+- PR #5: https://github.com/91wallace/AgentFlow/pull/5 — aberto, alvo `main`.
+- Base: `8ec623813709d71b98fbd0be7e8fba87ebb9d565`; implementação revisada e CI homologada em `ff10ef5ce495cb9466498ccaf5da7c61b729a357`.
+- Workflow acionado pelo push: [run 42075467307](https://github.com/91wallace/AgentFlow/actions/runs/42075467307): `test (3.11)`, `test (3.12)` e `test (3.13)` passaram.
+- Workflow acionado pelo pull request: [run 42075480855](https://github.com/91wallace/AgentFlow/actions/runs/42075480855): `test (3.11)`, `test (3.12)` e `test (3.13)` passaram.
+- Em ambos, o workflow CI executou em `ubuntu-latest`, instalou `.[test]`, rodou `python -m pytest -q` e `agentflow --version`. A primeira tentativa havia exposto somente a expectativa de newline específica do teste; a regressão foi corrigida e os seis jobs subsequentes passaram.
+- Docker real, agentes reais, entrega e deploy não foram executados; Windows não faz parte da matriz remota atual. O ambiente local de homologação foi Windows/Python 3.13.
