@@ -12,6 +12,7 @@ from typing import Iterator
 from uuid import uuid4
 
 from agentflow.planning import Plan, canonical, digest
+from agentflow.planning.loader import task_data
 
 from .contracts import (ConflictError, EvidenceInput, IntegrityError, TaskState,
                         Transition, TransitionError)
@@ -43,18 +44,32 @@ EXECUTION_SCHEMA = (
     "CREATE INDEX execution_events_by_attempt ON execution_events(attempt_id,event_id)",
 )
 
+GIT_SCHEMA = (
+    "CREATE TABLE workspaces(workspace_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, definition_revision INTEGER NOT NULL, repository_root TEXT NOT NULL, common_dir TEXT NOT NULL, worktree_path TEXT NOT NULL UNIQUE, branch TEXT NOT NULL UNIQUE, base_oid TEXT NOT NULL, current_head_oid TEXT NOT NULL, scope_digest TEXT NOT NULL, authorized_paths_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('creating','active','blocked','closing','closed')), owner_token TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_at TEXT, UNIQUE(workspace_id,project_id,task_id,definition_revision), FOREIGN KEY(project_id,task_id,definition_revision) REFERENCES task_definitions(project_id,task_id,definition_revision))",
+    "ALTER TABLE execution_attempts ADD COLUMN workspace_id TEXT REFERENCES workspaces(workspace_id)",
+    "CREATE UNIQUE INDEX one_live_workspace_per_task ON workspaces(project_id,task_id,definition_revision) WHERE status!='closed'",
+    "CREATE TABLE git_operations(operation_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, workspace_id TEXT NOT NULL, project_id TEXT NOT NULL, task_id TEXT NOT NULL, definition_revision INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('workspace_create','checkpoint','workspace_close','reconcile')), status TEXT NOT NULL CHECK(status IN ('prepared','running','verified','failed','unknown')), owner_token TEXT NOT NULL, request_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(workspace_id,project_id,task_id,definition_revision) REFERENCES workspaces(workspace_id,project_id,task_id,definition_revision))",
+    "CREATE UNIQUE INDEX one_active_git_operation_per_workspace ON git_operations(workspace_id) WHERE status IN ('prepared','running','unknown')",
+    "CREATE TABLE git_checkpoints(checkpoint_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, workspace_id TEXT NOT NULL, project_id TEXT NOT NULL, task_id TEXT NOT NULL, definition_revision INTEGER NOT NULL, base_oid TEXT NOT NULL, commit_oid TEXT NOT NULL UNIQUE, parent_oid TEXT NOT NULL, tree_oid TEXT NOT NULL, branch TEXT NOT NULL, paths_json TEXT NOT NULL, pathset_digest TEXT NOT NULL, actor_name TEXT NOT NULL, actor_email TEXT NOT NULL, verified INTEGER NOT NULL CHECK(verified IN (0,1)), created_at TEXT NOT NULL, FOREIGN KEY(operation_id) REFERENCES git_operations(operation_id), FOREIGN KEY(workspace_id,project_id,task_id,definition_revision) REFERENCES workspaces(workspace_id,project_id,task_id,definition_revision))",
+    "CREATE TABLE git_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(payload)<=4096), occurred_at TEXT NOT NULL, UNIQUE(operation_id,kind,payload), FOREIGN KEY(operation_id) REFERENCES git_operations(operation_id))",
+    "CREATE INDEX git_operations_by_workspace ON git_operations(workspace_id,created_at)",
+    "CREATE INDEX git_checkpoints_by_task ON git_checkpoints(project_id,task_id,definition_revision,created_at)",
+    "CREATE INDEX git_events_by_operation ON git_events(operation_id,event_id)",
+)
+
 
 class SQLiteStore:
-    def __init__(self, path: Path, *, execution: bool = False):
+    def __init__(self, path: Path, *, execution: bool = False, git: bool = False):
         self.path = path
         self.execution = execution
+        self.git = git
         self.existed = path.exists()
         if not path.parent.is_dir():
             raise IntegrityError(f"diretório inexistente: {path.parent}")
         try:
             self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise IntegrityError(f"versão SQLite futura: {version}")
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.execute("PRAGMA foreign_keys=ON")
@@ -111,38 +126,42 @@ class SQLiteStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 3:
             raise IntegrityError(f"versão SQLite futura: {version}")
-        if version in (1, 2):
+        if version:
             recorded = self.db.execute("SELECT version FROM schema_migrations").fetchall()
             if recorded != [(number,) for number in range(1, version + 1)]:
                 raise IntegrityError("histórico de migração divergente")
-            if version == 1 and self.execution:
+        else:
+            tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+            if tables:
+                raise IntegrityError("banco sem versão contém tabelas desconhecidas")
+            if self.existed and self.path.stat().st_size:
                 self._backup()
-                try:
-                    with self.transaction() as db:
-                        for statement in EXECUTION_SCHEMA:
-                            db.execute(statement)
-                        db.execute("INSERT INTO schema_migrations VALUES(2,?)", (now(),))
-                        db.execute("PRAGMA user_version=2")
-                except (sqlite3.DatabaseError, ConflictError) as exc:
-                    raise IntegrityError(f"migração v2 falhou: {exc}") from exc
-            return
-        tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
-        if tables:
-            raise IntegrityError("banco sem versão contém tabelas desconhecidas")
-        if self.existed and self.path.stat().st_size:
+            try:
+                with self.transaction() as db:
+                    for statement in SCHEMA:
+                        db.execute(statement)
+                    db.execute("INSERT INTO schema_migrations VALUES(1,?)", (now(),))
+                    db.execute("PRAGMA user_version=1")
+            except (sqlite3.DatabaseError, ConflictError) as exc:
+                raise IntegrityError(f"migração inicial falhou: {exc}") from exc
+            version = 1
+
+        target = 3 if self.git else (2 if self.execution else 1)
+        while version < target:
+            next_version = version + 1
             self._backup()
-        try:
-            with self.transaction() as db:
-                for statement in SCHEMA:
-                    db.execute(statement)
-                db.execute("INSERT INTO schema_migrations VALUES(1,?)", (now(),))
-                db.execute("PRAGMA user_version=1")
-        except ConflictError as exc:
-            raise IntegrityError(f"migração falhou: {exc}") from exc
-        if self.execution:
-            self._migrate()
+            statements = EXECUTION_SCHEMA if next_version == 2 else GIT_SCHEMA
+            try:
+                with self.transaction() as db:
+                    for statement in statements:
+                        db.execute(statement)
+                    db.execute("INSERT INTO schema_migrations VALUES(?,?)", (next_version, now()))
+                    db.execute(f"PRAGMA user_version={next_version}")
+            except (sqlite3.DatabaseError, ConflictError) as exc:
+                raise IntegrityError(f"migração v{next_version} falhou: {exc}") from exc
+            version = next_version
 
     def check_integrity(self) -> None:
         if self.db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -179,8 +198,8 @@ class SQLiteStore:
                            (spec_hash, task_hash, plan_revision, project))
 
             for task in plan.tasks:
-                snapshot = canonical({"task": asdict(task), "spec_digest": spec_hash})
-                definition_hash = digest({"task": asdict(task), "spec_digest": spec_hash})
+                snapshot = canonical({"task": task_data(task), "spec_digest": spec_hash})
+                definition_hash = digest({"task": task_data(task), "spec_digest": spec_hash})
                 row = db.execute("SELECT t.definition_revision,t.status,t.attempt_count,d.definition_digest FROM tasks t JOIN task_definitions d ON (t.project_id,t.task_id,t.definition_revision)=(d.project_id,d.task_id,d.definition_revision) WHERE t.project_id=? AND t.task_id=?", (project, task.id)).fetchone()
                 if row and row[3] == definition_hash:
                     continue
@@ -333,7 +352,7 @@ class SQLiteStore:
         self._external_operation_id(command.operation_id)
         allowed = {"pending": {"ready", "blocked"}, "ready": {"reserved", "blocked"},
                    "reserved": {"completed", "failed", "ready"}, "failed": {"ready", "blocked"},
-                   "blocked": {"pending", "ready"}, "completed": set()}
+                   "blocked": {"pending", "ready", "completed"}, "completed": set()}
         with self.transaction() as db:
             project = self._project_id()
             request = {"verb": "transition", "project": project, **asdict(command)}
@@ -349,7 +368,7 @@ class SQLiteStore:
                 raise TransitionError(f"transição inválida: {before} -> {command.destination}")
             if command.destination in ("ready", "reserved") and not self._dependencies_done(db, project, command.task_id):
                 raise TransitionError("dependências incompletas")
-            if before == "blocked" and command.destination != ("ready" if self._dependencies_done(db, project, command.task_id) else "pending"):
+            if before == "blocked" and command.destination not in ("completed", "ready" if self._dependencies_done(db, project, command.task_id) else "pending"):
                 raise TransitionError("destino incompatível com dependências")
             if command.destination in ("blocked", "failed") or (before == "reserved" and command.destination == "ready"):
                 if not command.reason.strip():
@@ -360,9 +379,35 @@ class SQLiteStore:
                 if bool(command.exception_author.strip()) != bool(command.exception_reason.strip()):
                     raise TransitionError("exceção exige autor e justificativa")
                 snapshot = db.execute("SELECT definition_snapshot FROM task_definitions WHERE project_id=? AND task_id=? AND definition_revision=?", (project, command.task_id, definition_revision)).fetchone()[0]
-                criteria = {item["id"] for item in json.loads(snapshot)["task"]["acceptance_criteria"]}
+                task_definition = json.loads(snapshot)["task"]
+                criteria = {item["id"] for item in task_definition["acceptance_criteria"]}
                 verified = {row[0] for row in db.execute("SELECT criterion_id FROM evidence WHERE project_id=? AND task_id=? AND definition_revision=? AND kind='verified' AND passed=1", (project, command.task_id, definition_revision))}
-                if not criteria <= verified and not (command.exception_author.strip() and command.exception_reason.strip()):
+                versioned_paths = tuple(task_definition.get("versioned_paths", ()))
+                if command.destination == "completed" and before == "blocked" and not versioned_paths:
+                    raise TransitionError("conclusão direta bloqueada; tarefa sem fluxo Git versionado")
+                if versioned_paths and command.destination == "completed":
+                    attempt = db.execute("SELECT workspace_id FROM execution_attempts WHERE project_id=? AND task_id=? AND definition_revision=? AND status='process_succeeded' AND validation_status='validation_passed' ORDER BY prepared_at DESC LIMIT 1",
+                                         (project, command.task_id, definition_revision)).fetchone()
+                    if attempt is None or not attempt[0]:
+                        raise TransitionError("conclusão exige processo resolvido e validação aprovada")
+                    checkpoint = db.execute("SELECT 1 FROM git_checkpoints c JOIN workspaces w ON w.workspace_id=c.workspace_id JOIN git_operations o ON o.operation_id=c.operation_id WHERE c.workspace_id=? AND c.project_id=? AND c.task_id=? AND c.definition_revision=? AND c.verified=1 AND c.commit_oid=w.current_head_oid AND o.status='verified' LIMIT 1",
+                                            (attempt[0], project, command.task_id, definition_revision)).fetchone()
+                    if checkpoint is None:
+                        no_change = db.execute("SELECT o.result_json,w.current_head_oid,w.status FROM git_operations o JOIN workspaces w ON w.workspace_id=o.workspace_id WHERE o.workspace_id=? AND o.kind='reconcile' AND o.status='verified' ORDER BY o.updated_at DESC LIMIT 1",
+                                                (attempt[0],)).fetchone()
+                        verified_noop = False
+                        if no_change is not None:
+                            try:
+                                result = json.loads(no_change[0])
+                                verified_noop = (result.get("no_changes_verified") is True
+                                                 and result.get("head_oid") == no_change[1]
+                                                 and result.get("workspace_id") == attempt[0]
+                                                 and no_change[2] == "active")
+                            except (TypeError, ValueError):
+                                verified_noop = False
+                        if not verified_noop:
+                            raise TransitionError("conclusão exige checkpoint Git verificado ou verificação explícita sem alterações")
+                if not criteria <= verified and (versioned_paths or not (command.exception_author.strip() and command.exception_reason.strip())):
                     raise TransitionError("critérios sem evidência verificada")
             db.execute("UPDATE tasks SET status=?,revision=revision+1,attempt_count=attempt_count+?,owner=?,reservation_operation=?,updated_at=? WHERE project_id=? AND task_id=? AND revision=?",
                        (command.destination, int(command.destination == "reserved"), command.owner if command.destination == "reserved" else "",

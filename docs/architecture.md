@@ -106,7 +106,7 @@ Um checkpoint é o último limite transacional confirmado de uma operação, com
 
 ## Fase 3 — executor Codex CLI local
 
-Esta arquitetura aprovada está implementada localmente na branch `feat/codex-executor-phase-3`; a homologação da CI ainda está pendente. A Fase 3 adiciona uma execução **explícita de uma tarefa por solicitação**, sem fila autônoma nem avanço automático para outra tarefa. A CLI não cria branch, commit, push, contêiner ou implantação. O protótipo `adr` continua intocado. O adaptador Codex CLI é substituível e não é importado pelo núcleo.
+A Fase 3 foi homologada e integrada pelo PR #3. O commit do PR `8f97cd7c6f657153c5f92934ad885d8e1659bf1c` foi integrado à `main` pelo merge commit `edb7c4f7f0e672d8d1432d2d8948c3b49b7f4b91`; os jobs Python 3.11, 3.12 e 3.13 passaram. A Fase 3 adiciona uma execução **explícita de uma tarefa por solicitação**, sem fila autônoma nem avanço automático para outra tarefa. A CLI não cria branch, commit, push, contêiner ou implantação. O protótipo `adr` continua intocado. O adaptador Codex CLI é substituível e não é importado pelo núcleo.
 
 ### Contratos entre módulos
 
@@ -147,4 +147,76 @@ Na reabertura, `prepared` sem prova de ausência de processo e `running` sem pro
 
 ### Invariantes e riscos a fechar
 
-Uma tarefa tem no máximo uma tentativa ativa; uma tentativa referencia exatamente uma revisão; status `completed` exige evidência verificada, não mensagem do agente; nenhuma reabertura repete efeito externo; logs e banco são locais e ignorados; falha de migração v2 mantém banco v1 íntegro e backup consistente. A versão local 0.166.0 teve capacidades e políticas verificadas; outras versões falham na pré-checagem até serem homologadas. A validação de critérios continua sendo fornecida por verificadores explícitos que registram evidência verificada; nenhum teste do projeto é iniciado automaticamente nesta etapa. A CI nas três versões Python e a revisão de publicação continuam pendentes.
+Uma tarefa tem no máximo uma tentativa ativa; uma tentativa referencia exatamente uma revisão; status `completed` exige evidência verificada, não mensagem do agente; nenhuma reabertura repete efeito externo; logs e banco são locais e ignorados; falha de migração v2 mantém banco v1 íntegro e backup consistente. A versão local 0.166.0 teve capacidades e políticas verificadas; outras versões falham na pré-checagem até serem homologadas. A validação de critérios continua sendo fornecida por verificadores explícitos que registram evidência verificada; nenhum teste do projeto é iniciado automaticamente nesta etapa. A CI passou nas três versões Python e a revisão do PR #3 foi aprovada; a Fase 3 está integrada.
+
+## Fase 4 — recuperação e integração explícita com Git (fechamento arquitetural)
+
+**Estado:** arquitetura aprovada; F4-01 a F4-09 implementadas localmente na branch `feat/git-recovery-phase-4`. F4-10 aguarda suíte final e CI remota após autorização de publicação. Base: Fase 3 integrada à `main` no merge commit `edb7c4f7f0e672d8d1432d2d8948c3b49b7f4b91`. Nenhuma execução de agente é iniciada autonomamente; Git remoto, push, pull/fetch, merge/rebase e deploy estão fora da fase.
+
+### Invariantes: execução, validação, conclusão
+
+O estado do processo, o resultado da validação e a conclusão da tarefa são três fatos distintos. Saída zero, branch criada, diff limpo ou commit não são evidência de que critérios foram satisfeitos. Somente evidências `verified`, vinculadas à revisão e a cada critério, permitem `completed`. Se a tarefa modificou arquivos versionados, um checkpoint Git verificado também é precondição necessária; não substitui as evidências. Tarefa que não pode modificar arquivos versionados não exige worktree nem checkpoint. Uma execução ambígua nunca é repetida automaticamente.
+
+### Workspace, identidade e branches
+
+Toda tarefa autorizada a modificar arquivos versionados recebe worktree Git isolada e obrigatória. O workspace tem ID persistente, projeto/repositório, task ID e revisão, caminho absoluto canonizado, branch própria, base OID, worktree Git comum, política de caminhos, estado e datas de criação/fechamento. A branch é exclusiva desse workspace, com referência e ciclo de vida persistidos; não compartilhar branch entre workspaces. Colisão de ID, caminho, branch, base inesperada ou worktree já registrada para outra identidade falha fechada.
+
+A criação é local e explícita. Preflight detecta estado e recursos antes de criar. O checkout original nunca é usado para escrita da tarefa e suas alterações tracked, staged ou untracked não são movidas nem descartadas. Em caso de alterações locais preexistentes no workspace registrado, interromper mutação e exigir reconciliação. Worktrees não são uma fronteira de segurança: compartilham object database, refs e configuração do repositório comum, e processos com acesso ao mesmo usuário podem alterar esses dados. AgentFlow valida repositório comum, branch, HEAD e identidade antes/depois de cada ação e assume que o agente/runtime já está limitado ao diretório aprovado; worktree por si só não impede acesso externo.
+
+Branches/worktrees só podem ser removidas por ação explícita após estado terminal reconciliado e verificação de ausência de alterações, operações desconhecidas, checkpoints não registrados e dependências. Nunca remover automaticamente se existir dirty state, operação ambígua, lock ativo, falha de verificação ou tarefa não reconciliada. Nesta fase o padrão recomendado é preservá-las; limpeza posterior é comando separado com confirmação e registro.
+
+### Contrato Git e segurança de caminhos
+
+`GitProvider` é protocolo substituível usado por serviço em `core`; `planning`, `state`, `execution` e `validation` não importam o adaptador concreto. A implementação local usa subprocessos com executável resolvido e argumentos separados (sem shell), `cwd` exatamente no workspace persistido, environment limitado, prompts interativos desativados, timeout e stdout/stderr limitados. Para toda operação mutável, resolver e verificar o diretório do worktree e do repositório comum; rejeitar path ou redirecionamento que faça a operação atingir outro workspace. `git -C` deve receber somente raiz previamente validada, nunca entrada livre.
+
+Nomes de arquivos seguem semântica Git em bytes/pathspec. Preservar Unicode e espaços sem divisão por shell; suportar nomes especiais por NUL-delimited interfaces (`-z`) e pathspec literal (`--literal-pathspecs`/`:(literal)` conforme comando). Não construir pathspecs por concatenação de strings. Validar cada caminho como relativo à raiz, normalizado e sem traversal; resolver symlinks e rejeitar escape. Em Windows, tratar separadores, drive/UNC, normalização Unicode e comparação case-insensitive sem colapsar nomes que Git distingue; conflito de case falha com diagnóstico. Submódulos são detectados e toda operação que os toque é recusada nesta fase, inclusive pathspec que selecione o gitlink.
+
+Nenhuma operação remota é permitida: não executar push, pull, fetch, clone, merge, rebase ou deploy; nem buscar refs remotas. Não alterar configuração global/local de Git nem credenciais. Rejeitar config de alias/extensão que redirecione comando gerenciado e opções de protocolo/extensão não reconhecidas. Não executar `reset`, `clean`, checkout destrutivo, `gc`, `prune` ou remoção implícita.
+
+### Lista explícita e checkpoint
+
+O escopo autorizado da tarefa deve produzir lista explícita e persistida de caminhos relativos que podem entrar no checkpoint. A lista é aprovada antes da operação, vinculada à revisão da tarefa e não pode ser ampliada pelo executor. Alteração de escopo gera nova revisão/revalidação explícita. Imediatamente antes do staging **e novamente imediatamente antes do commit**, revalidar cada caminho: pertencimento ao workspace, ausência de escape/symlink, tipo regular permitido, ausência de submódulo, política de exclusão e estado/digest esperado. Mudança desde a validação interrompe a operação e requer novo pedido.
+
+Não usar `git add -A`, `git add .` nem staging global. Preparar index temporário privado via `GIT_INDEX_FILE` ou mecanismo equivalente; construir staging somente com a lista autorizada, em pathspec literal/NUL-safe. Verificar `git diff --cached --name-only -z` exatamente contra allowlist antes de commit. Rejeitar arquivo não rastreado ou arquivo operacional/credencial/cache/banco/log salvo se e somente se política explícita permitir (padrão é rejeitar). Depois de commit, verificar independentemente OID, parent, tree, branch/ref esperada e paths da árvore contra a lista. Persistir OIDs e hash canônico do conjunto de paths no registro imutável do checkpoint.
+
+Conclusão de tarefa com alterações versionadas exige: processo não ambíguo, validação aprovada, evidências verificadas para todos os critérios da revisão e checkpoint verificado da mesma revisão/workspace. Qualquer alteração posterior ao checkpoint invalida seu uso para conclusão até nova validação e novo checkpoint. Se a tarefa não produziu mudança versionada, uma operação explícita `verify-no-changes` registra intenção e confirma branch/HEAD idênticos ao estado persistido e workspace limpo; não se cria commit vazio. Essa observação também é recuperável e não substitui validação/evidências.
+
+### Persistência, atomicidade e estados
+
+Migração SQLite v3 é transacional e precedida por backup consistente; falha preserva v2. Tabelas propostas: `workspaces` (identidade/lifecycle/branch/base/repo); `git_operations` (intenção, `operation_id`, digest parâmetros, ator, estado e resultado verificado); `git_checkpoints` (workspace/task/revision, operação, base/commit/tree/parent, paths/hash, ator); `git_events` append-only. FKs e constraints impedem checkpoint órfão ou cruzado entre task/revision/workspace. Operação e checkpoint são conceitos distintos dos checkpoints lógicos F2/F3.
+
+`operation_id` único globalmente na camada de operações Git. Repetição com tipo, workspace, revisão, escopo e digest idênticos retorna a operação/resultado já registrado, sem executar Git novamente; divergência em qualquer parâmetro é conflito. Uma operação `unknown` não é reexecutada mesmo com mesmos argumentos; somente a reconciliação pode concluir o registro ou produzir nova operação explicitamente autorizada.
+
+Toda mutação segue: preflight → transação curta para reservar workspace e registrar intenção `prepared` → operação Git fora da transação → inspeção independente do estado real → transação para persistir `verified`/`failed` e evento. Estados: `prepared -> running -> verified | failed | unknown`. Queda, timeout ou sinal interrompendo a janela após efeito potencial deixa `unknown`; reconciliação verifica HEAD/ref/index/tree e parâmetros gravados, emite evento idempotente e resolve apenas se um único resultado corresponder. Caso contrário bloqueia workspace/tarefa. Nunca manter transação SQLite aberta durante subprocesso nem tentar simular atomicidade distribuída.
+
+Checkpoint: `prepared -> created -> verified`; queda após criação e antes da confirmação DB é `unknown`, reconciliada pelo commit OID/ref/tree e pelo operation ID gravado como trailer/mensagem estruturada quando tecnicamente confiável. Se identificação inequívoca não for possível, não criar outro commit e solicitar resolução explícita. Resultado verificável é guardado antes de liberar reserva. Reabertura repetida não duplica evento.
+
+### Concorrência e locks
+
+Reserva transacional SQLite com índice único para operação ativa por workspace/task, combinada com lock interprocesso no próprio diretório administrativo do worktree; lock contém token aleatório, operation ID, PID, instante de criação e identidade da máquina/processo suportada. PID isolado não identifica dono. Dois processos concorrentes: apenas um consegue reservar; lock órfão ou identidade incerta bloqueia e demanda reconciliação, não expiração otimista. Revalidar lock e HEAD após cada comando Git. A serialização é por workspace e por refs compartilhadas do repositório comum onde aplicável; alteração externa de branch/ref entre leitura e escrita invalida a operação.
+
+### Alterações preexistentes e limites de proteção
+
+O worktree original pode estar dirty; isso não impede criação isolada se a base for identificada sem alterá-lo. O workspace novo deve começar limpo na base registrada. Alterações fora do allowlist nunca são incluídas e alteram o diagnóstico; não descartar nem mover arquivos automaticamente. Usuários/processos externos ainda podem escrever no worktree, em `.git` comum, refs ou banco entre as verificações; a proteção é de isolamento operacional e detecção, não sandbox contra processo malicioso com mesmo usuário. Um agente pode escrever fora do worktree se o runtime não aplicar sandbox efetivo. Essa limitação precisa ser visível e configuração de segurança não confirmada deve falhar antes do spawn conforme Fase 3.
+
+### Integração com o fluxo e compatibilidade
+
+`core` coordena repositório de tarefa, executor F3, validador e `GitProvider` por protocolos, sem acoplar módulos. F3 associa tentativa ao workspace persistente. Validação consome diff/artefatos observados e emite evidências; só regras explícitas as marcam verificadas. Conclusão consulta em uma transação estado de execução, revisão, evidências e checkpoint verificado. Não interpretar presença de branch/commit como sucesso de agente.
+
+Linux e Windows são alvo. Testes usam repositórios temporários locais; subprocessos com `shell=False`, paths NUL-safe e locks interprocesso específicos por sistema. Se Windows não oferecer semântica segura para um path/ref/lock ou se Linux não conseguir reconciliar identidade, recusar operação. Submódulos recusados em ambas as plataformas. Worktrees podem deixar refs/objetos após crash e não isolam configuração/ref do repositório comum; limpeza é explícita e conservadora.
+
+### F4-01 — parâmetros operacionais fixados
+
+Identidade `workspace_id`: UUIDv4 minúsculo sem hífen, prefixo `ws-`; branch exclusiva `agentflow/ws/<uuid-hex>`; worktree `<git-common-dir>/agentflow/worktrees/<uuid-hex>`; lock file persistente `<git-common-dir>/agentflow/locks/<uuid-hex>.lock`. Identidade real reside no SQLite, não se deduz do path. Digests são `sha256:` de JSON canônico UTF-8 (chaves ordenadas, sem espaços/floats/NaN, strings NFC); digest de pathset usa array sem duplicatas ordenado por bytes UTF-8 NFC, cada item terminado por NUL. Operation digest abrange todos os parâmetros e ator.
+
+Limites máximos: 128 paths por checkpoint, 1024 bytes UTF-8 por caminho relativo, 255 por componente, 64 MiB agregados de conteúdo, 4 MiB de saída/status total por comando, 1 MiB por stdout/stderr e timeout Git de 30 s. Exceder limite bloqueia antes do commit sem apagar alterações.
+
+Reserva SQLite `BEGIN IMMEDIATE` mais lock OS não bloqueante no primeiro byte: `flock(LOCK_EX|LOCK_NB)` Linux; `msvcrt.locking(LK_NBLCK, 1)` Windows. Sem expiração temporal. Owner record usa UUID aleatório, PID, início, Linux boot ID ou Windows creation FILETIME, hostname e operation ID. Após morte, lock de kernel libera, mas arquivo permanece; nova posse detecta operação `prepared/running`, marca `unknown` em evento idempotente e bloqueia. Não repete automaticamente nem presume que Git não ocorreu.
+
+Workspaces, branches, checkpoints, eventos e locks não expiram automaticamente; retenção de eventos/checkpoints é indefinida. Limpeza exige comando explícito, lock exclusivo, estado terminal/reconciliado, ausência de operação desconhecida, dirty/untracked/submódulo; preserva histórico persistido. Checkpoint só é reconhecido quando há commit de parent único igual à base, branch/ref esperada, HEAD/OID e tree consistentes, diferença de paths exatamente igual ao allowlist, blobs/tipos esperados e trailer único `AgentFlow-Operation: <operation_id>`. Falha ou ambiguidade deixa checkpoint não verificado.
+
+Git é invocado em argv sem shell, com prompts desligados; sistema/global config isolados por ambiente privado, hooksPath vazio, assinatura/editor desativados e herança de variáveis `GIT_*` removida. Não alterar configuração de usuário. Rejeitar alias/redirecionamento, hooks personalizados, filtros externos `filter.*`, fsmonitor executável, atributos filter, submódulos e mecanismos não auditáveis. Ator (nome/email) deve ser explícito e persistido; committer fixo AgentFlow; mensagem <=1 KiB. Estes parâmetros operacionais mensuráveis estão fixados em F4-01 e cobertos pelos testes de implementação.
+
+### Contrato de escopo por revisão
+
+A Fase 4 evolui `tasks.toml` para schema v2, com `versioned_paths` obrigatório por tarefa. Uma lista vazia declara tarefa sem escrita versionada; lista não vazia é uma allowlist exata de paths relativos para a revisão. Não há glob nem diretório implícito. Schema v1 continua legível e equivale a lista vazia, preservando digests legados quando o campo está vazio; só edição/revisão explícita autoriza novo escopo. O modelo `Task` e seu snapshot persistido carregam a lista. Agente que precisa alterar arquivo versionado deve receber worktree; modo de execução gravável sem escopo aprovado é recusado.

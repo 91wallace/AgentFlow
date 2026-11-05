@@ -3,6 +3,7 @@
 from dataclasses import asdict
 import hashlib
 import json
+import unicodedata
 from pathlib import Path
 import re
 import tomllib
@@ -23,6 +24,34 @@ def canonical(value: object) -> str:
 
 def digest(value: object) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+
+
+def task_data(task: Task) -> dict:
+    """Stable task payload; empty F4 scope preserves v1/F2/F3 digests."""
+    data = {"id": task.id, "title": task.title, "description": task.description,
+            "acceptance_criteria": [asdict(item) for item in task.acceptance_criteria],
+            "depends_on": list(task.depends_on)}
+    if task.versioned_paths:
+        data["versioned_paths"] = list(task.versioned_paths)
+    return data
+
+
+def _versioned_paths(value: object, where: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(type(item) is not str for item in value):
+        raise PlanError(f"{where}: lista de caminhos esperada")
+    result: list[str] = []
+    for item in value:
+        normalized = unicodedata.normalize("NFC", item)
+        parts = normalized.split("/")
+        if (not normalized or "\x00" in normalized or normalized.startswith("/") or "\\" in normalized
+                or re.match(r"^[A-Za-z]:", normalized) or any(part in ("", ".", "..") for part in parts)
+                or len(normalized.encode("utf-8")) > 1024
+                or any(len(part.encode("utf-8")) > 255 for part in parts)):
+            raise PlanError(f"{where}: caminho relativo inválido: {item!r}")
+        if normalized in result:
+            raise PlanError(f"{where}: caminho duplicado: {normalized!r}")
+        result.append(normalized)
+    return tuple(sorted(result, key=lambda path: path.encode("utf-8")))
 
 
 def _table(value: object, allowed: set[str], required: set[str], where: str) -> dict:
@@ -63,8 +92,10 @@ def _read(path: Path, allowed: set[str], required: set[str]) -> dict:
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise PlanError(f"{path}: {exc}") from exc
     table = _table(data, allowed | {"schema_version"}, required | {"schema_version"}, str(path))
-    if type(table["schema_version"]) is not int or table["schema_version"] != 1:
-        raise PlanError(f"{path}.schema_version: versão 1 exigida")
+    versions = (1, 2) if path.name == "tasks.toml" else (1,)
+    if type(table["schema_version"]) is not int or table["schema_version"] not in versions:
+        message = "versão 1 exigida" if versions == (1,) else f"versões suportadas: {', '.join(map(str, versions))}"
+        raise PlanError(f"{path}.schema_version: {message}")
     return table
 
 
@@ -79,14 +110,17 @@ def load_spec(path: Path) -> Specification:
 
 def load_tasks(path: Path) -> tuple[Task, ...]:
     data = _read(path, {"tasks"}, {"tasks"})
+    schema_version = data["schema_version"]
     if not isinstance(data["tasks"], list) or not data["tasks"]:
         raise PlanError(f"{path}.tasks: lista não vazia esperada")
     tasks = []
     seen: set[str] = set()
     for index, raw in enumerate(data["tasks"]):
         place = f"{path}.tasks[{index}]"
-        item = _table(raw, {"id", "title", "description", "acceptance_criteria", "depends_on"},
+        item = _table(raw, {"id", "title", "description", "acceptance_criteria", "depends_on", "versioned_paths"},
                       {"id", "title", "description", "acceptance_criteria"}, place)
+        if schema_version == 2 and "versioned_paths" not in item:
+            raise PlanError(f"{place}.versioned_paths: obrigatório no schema v2 (use lista vazia para tarefa sem escrita versionada)")
         name = _text(item["id"], f"{place}.id", True)
         if name in seen:
             raise PlanError(f"{place}.id: duplicado: {name}")
@@ -99,7 +133,8 @@ def load_tasks(path: Path) -> tuple[Task, ...]:
         tasks.append(Task(name, _text(item["title"], f"{place}.title"),
                           _text(item["description"], f"{place}.description"),
                           _criteria(item["acceptance_criteria"], f"{place}.acceptance_criteria"),
-                          tuple(sorted(deps))))
+                          tuple(sorted(deps)),
+                          _versioned_paths(item.get("versioned_paths", []), f"{place}.versioned_paths")))
     return tuple(sorted(tasks, key=lambda task: task.id))
 
 
@@ -133,4 +168,4 @@ def load_plan(directory: Path) -> Plan:
     spec = load_spec(directory / "spec.toml")
     tasks = load_tasks(directory / "tasks.toml")
     order = task_order(tasks)
-    return Plan(spec, tasks, order, digest(asdict(spec)), digest([asdict(task) for task in tasks]))
+    return Plan(spec, tasks, order, digest(asdict(spec)), digest([task_data(task) for task in tasks]))

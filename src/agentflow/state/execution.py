@@ -28,7 +28,7 @@ class Attempt:
 
 class ExecutionStore(SQLiteStore):
     def __init__(self, path: Path):
-        super().__init__(path, execution=True)
+        super().__init__(path, execution=True, git=True)
 
     def attempt(self, attempt_id: str) -> Attempt:
         row = self.db.execute("SELECT attempt_id,task_id,definition_revision,status,validation_status,operation_id FROM execution_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
@@ -51,6 +51,7 @@ class ExecutionStore(SQLiteStore):
                              "definition_revision": request.definition_revision,
                              "definition_digest": request.definition_digest,
                              "workspace": str(request.workspace.resolve()), "instruction": request.instruction,
+                             "workspace_id": request.workspace_id,
                              "acceptance_criteria": request.acceptance_criteria,
                              "policy": request.policy.__dict__, "retry_reason": retry_reason},
                               "adapter": spec.adapter_name, "version": spec.adapter_version,
@@ -91,15 +92,29 @@ class ExecutionStore(SQLiteStore):
                 raise TransitionError("limite de três tentativas atingido")
             if not self._dependencies_done(db, request.project_id, request.task_id):
                 raise TransitionError("dependências incompletas")
+            definition_snapshot = db.execute("SELECT definition_snapshot FROM task_definitions WHERE project_id=? AND task_id=? AND definition_revision=?",
+                                             (request.project_id, request.task_id, request.definition_revision)).fetchone()[0]
+            authorized_paths = tuple(json.loads(definition_snapshot)["task"].get("versioned_paths", ()))
+            if authorized_paths:
+                if not request.workspace_id:
+                    raise TransitionError("tarefa com escrita versionada exige workspace Git")
+                workspace = db.execute("SELECT worktree_path,status,project_id,task_id,definition_revision,authorized_paths_json FROM workspaces WHERE workspace_id=?",
+                                       (request.workspace_id,)).fetchone()
+                if (workspace is None or workspace[1] != "active"
+                        or workspace[2:5] != (request.project_id, request.task_id, request.definition_revision)
+                        or Path(workspace[0]).resolve() != request.workspace.resolve()
+                        or tuple(json.loads(workspace[5])) != authorized_paths):
+                    raise TransitionError("workspace não corresponde ao escopo/revisão solicitados")
             attempt_id = uuid4().hex
             db.execute("UPDATE tasks SET status='reserved',revision=revision+1,attempt_count=attempt_count+1,owner=?,reservation_operation=?,updated_at=? WHERE project_id=? AND task_id=?",
                        (owner, request.operation_id, now(), request.project_id, request.task_id))
             self._event(db, request.project_id, request.task_id, request.definition_revision,
                         "ready", "reserved", "execution prepared", request.operation_id, "execution")
-            db.execute("INSERT INTO execution_attempts(attempt_id,project_id,task_id,definition_revision,operation_id,request_digest,status,owner,prepared_at,adapter_name,adapter_version,capabilities,effective_sandbox,effective_approval) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO execution_attempts(attempt_id,project_id,task_id,definition_revision,operation_id,request_digest,status,owner,prepared_at,adapter_name,adapter_version,capabilities,effective_sandbox,effective_approval,workspace_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (attempt_id, request.project_id, request.task_id, request.definition_revision,
                         request.operation_id, fingerprint, "prepared", owner, now(), spec.adapter_name,
-                        spec.adapter_version, canonical(spec.capabilities), spec.effective_sandbox, spec.effective_approval))
+                        spec.adapter_version, canonical(spec.capabilities), spec.effective_sandbox, spec.effective_approval,
+                        request.workspace_id or None))
             db.execute("INSERT INTO operations(operation_id,request_digest,result_type,result_id,result_snapshot,created_at) VALUES(?,?,?,?,?,?)",
                        (request.operation_id, fingerprint, "execution_attempt", None, attempt_id, now()))
             self._execution_event(db, attempt_id, "prepared", {"owner": owner})
@@ -168,10 +183,15 @@ class ExecutionStore(SQLiteStore):
             if passed:
                 task = self._task_row(db, project, attempt.task_id)
                 snapshot = db.execute("SELECT definition_snapshot FROM task_definitions WHERE project_id=? AND task_id=? AND definition_revision=?", (project, attempt.task_id, attempt.definition_revision)).fetchone()[0]
-                criteria = {item["id"] for item in json.loads(snapshot)["task"]["acceptance_criteria"]}
+                task_definition = json.loads(snapshot)["task"]
+                criteria = {item["id"] for item in task_definition["acceptance_criteria"]}
                 passed_criteria = {dbrow[0] for dbrow in db.execute("SELECT criterion_id FROM evidence WHERE project_id=? AND task_id=? AND definition_revision=? AND kind='verified' AND passed=1", (project, attempt.task_id, attempt.definition_revision))}
                 if not criteria <= passed_criteria or not criteria <= verified_criteria:
                     raise TransitionError("critérios sem evidência verificada")
+                # Versioned writes need a fresh Git verification in the Git coordinator.
+                # Do not complete from validation alone; F4 owns that final guarded transition.
+                if task_definition.get("versioned_paths"):
+                    return self.attempt(attempt_id)
                 operation_id = f"complete:{attempt_id}"
                 self._external_operation_id(operation_id)
                 db.execute("UPDATE tasks SET status='completed',revision=revision+1,updated_at=? WHERE project_id=? AND task_id=? AND status='blocked'",

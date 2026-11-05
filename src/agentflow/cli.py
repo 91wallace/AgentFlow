@@ -20,6 +20,12 @@ from .agents.codex import CodexAdapter
 from .runtime.local import LocalRuntime, SpawnFailure
 from .runtime.local import LocalRuntime as _ProcessController
 from .planning import digest
+from .planning.loader import task_data
+from .git.contracts import CheckpointRequest, GitError, WorkspaceRequest
+from .git.provider import GitLocalProvider
+from .core.git import GitCoordinator
+from .state.git import GitStateStore
+from .state.contracts import Transition
 
 
 class _NeverCancel:
@@ -31,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentflow")
     parser.add_argument("--version", action="version", version=f"agentflow {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "doctor", "plan", "state", "execute", "cancel", "recover", "cleanup"):
+    for name in ("init", "doctor", "plan", "state", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete"):
         command = commands.add_parser(name)
         command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
         if name == "execute":
@@ -46,6 +52,18 @@ def main(argv: list[str] | None = None) -> int:
         if name == "cleanup":
             command.add_argument("--logs", action="store_true", required=True)
             command.add_argument("--older-than-days", type=int, default=30)
+        if name == "checkpoint":
+            command.add_argument("--task", required=True)
+            command.add_argument("--operation-id", required=True)
+            command.add_argument("--file", action="append", required=True)
+            command.add_argument("--author", required=True)
+            command.add_argument("--email", required=True)
+            command.add_argument("--message", required=True)
+        if name in ("complete", "verify-no-changes"):
+            command.add_argument("--task", required=True)
+            command.add_argument("--operation-id", required=True)
+        if name == "complete":
+            command.add_argument("--expected-revision", type=int, required=True)
     try:
         args = parser.parse_args(argv)
         if args.command == "init":
@@ -61,6 +79,40 @@ def main(argv: list[str] | None = None) -> int:
             plan = load_plan(root / ".agentflow")
             for task in inspect_state(root / ".agentflow" / "state.sqlite3", plan):
                 print(f"{task.task_id}: {task.status} (revisão {task.definition_revision})")
+            return 0
+        if args.command == "workspaces":
+            with GitStateStore(root / ".agentflow" / "state.sqlite3") as store:
+                rows = store.db.execute("SELECT workspace_id,task_id,definition_revision,branch,status,worktree_path,current_head_oid FROM workspaces ORDER BY created_at,workspace_id").fetchall()
+                for row in rows:
+                    print(f"{row[0]} {row[1]} r{row[2]} {row[3]} {row[4]} {row[5]} HEAD={row[6]}")
+            return 0
+        if args.command == "git-recover":
+            with GitStateStore(root / ".agentflow" / "state.sqlite3") as store, GitLocalProvider() as provider:
+                for operation_id, status in GitCoordinator(store, provider).recover():
+                    print(f"{operation_id}: {status}")
+            return 0
+        if args.command in ("checkpoint", "verify-no-changes", "complete"):
+            with GitStateStore(root / ".agentflow" / "state.sqlite3") as store, GitLocalProvider() as provider:
+                coordinator = GitCoordinator(store, provider)
+                states = {item.task_id: item for item in store.list_tasks()}
+                state = states.get(args.task)
+                if state is None:
+                    raise StateError(f"tarefa desconhecida: {args.task}")
+                if args.command in ("checkpoint", "verify-no-changes"):
+                    workspace = store.workspace_for_task(store.db.execute("SELECT project_id FROM projects").fetchone()[0], args.task, state.definition_revision)
+                    if workspace is None:
+                        raise StateError("workspace ativo não encontrado para a revisão vigente")
+                    if args.command == "checkpoint":
+                        checkpoint = coordinator.create_checkpoint(CheckpointRequest(workspace.workspace_id, args.operation_id,
+                            tuple(args.file), args.author, args.email, args.message))
+                        print(f"Checkpoint verificado: {checkpoint.commit_oid}")
+                    else:
+                        coordinator.verify_no_changes(workspace.workspace_id, args.operation_id)
+                        print(f"Workspace sem alterações verificadas: {workspace.workspace_id}")
+                else:
+                    result = coordinator.complete_task(Transition(args.task, "completed", args.operation_id,
+                                                                  args.expected_revision))
+                    print(f"Tarefa concluída: {result.task_id} (revisão {result.revision})")
             return 0
         if args.command == "cancel":
             log_root = root / ".agentflow" / "runs"
@@ -103,14 +155,27 @@ def main(argv: list[str] | None = None) -> int:
                 raise StateError(f"tarefa desconhecida: {args.task}")
             if args.timeout < 1 or args.timeout > 7200:
                 raise ExecutionError("timeout deve estar entre 1 e 7200 segundos")
-            definitions = {item.id: digest({"task": asdict(item), "spec_digest": plan.spec_digest}) for item in plan.tasks}
+            definitions = {item.id: digest({"task": task_data(item), "spec_digest": plan.spec_digest}) for item in plan.tasks}
             workspace = root.resolve()
+            workspace_id = ""
+            if task.versioned_paths:
+                with GitLocalProvider() as provider, GitStateStore(root / ".agentflow" / "state.sqlite3") as git_store:
+                    git_store.import_plan(plan)
+                    top, common, head = provider.inspect(root)
+                    current = next(item for item in git_store.list_tasks() if item.task_id == task.id)
+                    workspace_request = WorkspaceRequest(plan.specification.project_id, task.id, current.definition_revision,
+                        definitions[task.id], "workspace-" + hashlib.sha256(args.operation_id.encode("utf-8")).hexdigest()[:32],
+                        top, head, task.versioned_paths)
+                    managed = GitCoordinator(git_store, provider).create_workspace(workspace_request)
+                    workspace = managed.path
+                    workspace_id = managed.workspace_id
             request = ExecutionRequest(plan.specification.project_id, task.id, 1, definitions[task.id],
                                        args.operation_id, workspace,
                                        f"{task.title}\n\n{task.description}\n\nAcceptance criteria:\n" +
                                        "\n".join(f"- {criterion.id}: {criterion.description}" for criterion in task.acceptance_criteria),
                                        ExecutionPolicy(args.timeout, sandbox=args.sandbox, approval=args.approval),
-                                       tuple((criterion.id, criterion.description) for criterion in task.acceptance_criteria))
+                                       tuple((criterion.id, criterion.description) for criterion in task.acceptance_criteria),
+                                       workspace_id)
             adapter = CodexAdapter()
             spec = adapter.prepare(request)  # All capability checks happen before reservation.
             state_path = root / ".agentflow" / "state.sqlite3"
@@ -119,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                 current = next(item for item in store.list_tasks() if item.task_id == task.id)
                 request = ExecutionRequest(request.project_id, request.task_id, current.definition_revision,
                                            definitions[task.id], request.operation_id, request.workspace,
-                                           request.instruction, request.policy, request.acceptance_criteria)
+                                           request.instruction, request.policy, request.acceptance_criteria,
+                                           request.workspace_id)
                 attempt = store.prepare(request, spec, f"pid:{os.getpid()}", retry_reason=args.retry_reason)
                 if not attempt.created:
                     print(f"Tentativa existente {attempt.attempt_id}: {attempt.status}; nenhum processo reiniciado.")
@@ -150,6 +216,6 @@ def main(argv: list[str] | None = None) -> int:
             requirement = "obrigatório" if check.required else "opcional"
             print(f"{check.name}: {check.status} ({requirement}) — {check.detail}")
         return 1 if any(c.required and c.status != "ok" for c in checks) else 0
-    except (ConfigError, InitError, PlanError, StateError, ExecutionError) as exc:
+    except (ConfigError, InitError, PlanError, StateError, ExecutionError, GitError) as exc:
         print(f"Erro: {exc}", file=sys.stderr)
         return 2
