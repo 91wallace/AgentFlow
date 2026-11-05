@@ -2,7 +2,7 @@
 
 ## Estado e objetivo
 
-O repositório versiona `README.md`, `LICENSE` Apache 2.0 e `autonomous-development-runner-v0.1.zip`. O protótipo extraído em `autonomous-development-runner/` está não versionado: pacote `adr`, CLI monolítica, estado em JSON e execução direta de `codex exec`. Não há testes ou CI. A Fase 1 cria a fundação do novo produto sem alterar esse protótipo nem ativar execução autônoma.
+O repositório versiona `README.md`, `LICENSE` Apache 2.0 e `autonomous-development-runner-v0.1.zip`. O protótipo extraído em `autonomous-development-runner/` está não versionado: pacote `adr`, CLI monolítica, estado em JSON e execução direta de `codex exec`. A Fase 1 entrega o pacote `agentflow`, uma suíte pytest e um workflow de CI para Python 3.11, 3.12 e 3.13, sem alterar esse protótipo nem ativar execução autônoma.
 
 O processo `agentflow` roda localmente. No produto completo, o núcleo escolhe tarefas e aplica políticas; adaptadores executam agentes em ambiente local ou Docker; validadores produzem evidências; SQLite guarda estado operacional e Git guarda alterações de código e checkpoints. Docker nunca é requisito para o modo local.
 

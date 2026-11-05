@@ -74,6 +74,40 @@ def test_init_directory_conflict(tmp_path):
     assert (root / ".agentflow").read_text() == "keep me"
 
 
+@pytest.mark.parametrize("failure_at", ["mkdir", "open"])
+def test_init_write_failure_is_controlled_and_preserves_files(tmp_path, monkeypatch, capsys, failure_at):
+    root = git_repo(tmp_path / "repo")
+    directory = root / ".agentflow"
+    if failure_at == "open":
+        directory.mkdir()
+    existing = root / "existing.txt"
+    existing.write_bytes(b"keep these bytes\r\n")
+    original_mkdir = Path.mkdir
+    original_open = Path.open
+
+    def denied_mkdir(path, *args, **kwargs):
+        if path == directory:
+            raise PermissionError("simulated mkdir denial")
+        return original_mkdir(path, *args, **kwargs)
+
+    def denied_open(path, *args, **kwargs):
+        if path == directory / "config.toml":
+            raise PermissionError("simulated open denial")
+        return original_open(path, *args, **kwargs)
+
+    if failure_at == "mkdir":
+        monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+    else:
+        monkeypatch.setattr(Path, "open", denied_open)
+
+    assert main(["init", "--path", str(root)]) == 2
+    output = capsys.readouterr()
+    assert "não foi possível criar" in output.err
+    assert "configuração criada" not in output.out
+    assert existing.read_bytes() == b"keep these bytes\r\n"
+    assert not (directory / "config.toml").exists()
+
+
 def test_doctor_requirements_and_optional_absence():
     def missing(executable, arguments):
         return ("ok", "git version") if executable == "git" else ("missing", "não encontrado")
