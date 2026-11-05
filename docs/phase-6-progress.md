@@ -89,4 +89,15 @@ Registro incremental para retomada. Nenhum agente real foi executado; não houve
 - Suíte completa Windows/Python 3.13: `py -3.13 -m pytest -q` — **236 passed** (220,84 s), exit code 0.
 - `git diff --check` passou; Git emite somente avisos de conversão LF/CRLF do working tree.
 - Instalação final de `agentflow 0.1.0` em venv temporário, sem dependências de runtime: wheel SHA-256 `d067c7500adf0a08fcf568d94f527db000f6ca02a67ba4fada94d513a8af9e47`. `agentflow --version` e `agentflow --help` passaram.
-- `.github/workflows/ci.yml` expandido para seis combinações: Ubuntu/Windows × Python 3.11/3.12/3.13. Jobs remotos aguardam o commit/push desta branch; Linux ainda não executado localmente.
+- `.github/workflows/ci.yml` expandido para seis combinações: Ubuntu/Windows × Python 3.11/3.12/3.13. Linux e Windows foram homologados remotamente na matriz indicada abaixo.
+
+### Publicação e CI remota após F6-11
+
+- Branch publicada: `feat/agent-ecosystem-phase-6`.
+- Commit de implementação e adaptador Hermes: `29ebebbd11f8a39fd513d12c0edfc6e161f5e2da` (`feat: add Agent ecosystem and Hermes adapter`).
+- PR: https://github.com/91wallace/AgentFlow/pull/6, base `main`, estado aberto; merge não realizado.
+- CI de PR `42099621046` (head SHA acima): seis jobs concluídos com `success`: `ubuntu-latest` Python 3.11, 3.12, 3.13 e `windows-latest` Python 3.11, 3.12, 3.13. Cada job passou instalação, pytest e smoke test da CLI.
+- CI de push `42099559823` para o mesmo SHA também terminou com sucesso nos seis jobs.
+- Anotações não bloqueantes do GitHub: aviso de migração dos runners `ubuntu-latest` para Ubuntu 26 e de ações que declaram Node.js 20, forçadas a executar em Node.js 24. Nenhuma falha de validação foi reportada.
+- Nenhum defeito precisou de correção durante esta homologação remota. Nenhum agente real foi executado.
+- Esta evidência descreve as execuções acima para o commit `29ebebbd...`; a atualização documental presente será publicada em commit separado e sua CI deverá ser acompanhada antes do encerramento.
