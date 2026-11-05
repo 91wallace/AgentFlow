@@ -16,7 +16,7 @@ import uuid
 import unicodedata
 
 from .contracts import (Checkpoint, CheckpointRequest, GitConflict, GitError,
-                        Workspace, WorkspaceRequest)
+                        TreeEntry, Workspace, WorkspaceRequest)
 from .digests import pathset_digest
 from .locking import WorkspaceLock
 
@@ -532,6 +532,117 @@ class GitLocalProvider:
         if self.changed_paths(root):
             return False
         return True
+
+    def tree_entries(self, repository: Path, tree_oid: str) -> tuple[TreeEntry, ...]:
+        """Read a recursive tree listing without checkout, filters or path conversion."""
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree_oid):
+            raise GitConflict("tree OID inválido")
+        root = self._rooted(repository)
+        raw = self._run(root, "ls-tree", "-r", "-z", tree_oid)
+        result: list[TreeEntry] = []
+        for entry in raw.split(b"\0"):
+            if not entry:
+                continue
+            metadata, separator, raw_path = entry.partition(b"\t")
+            fields = metadata.split(b" ")
+            if not separator or len(fields) != 3:
+                raise GitError("tree listing malformado")
+            try:
+                mode = int(fields[0], 8)
+                object_type = fields[1].decode("ascii")
+                object_id = fields[2].decode("ascii")
+                path = raw_path.decode("utf-8", "strict")
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise GitConflict("tree contém entrada não suportada") from exc
+            if object_type not in {"blob", "commit", "tree"} or not re.fullmatch(
+                    r"[0-9a-f]{40}|[0-9a-f]{64}", object_id):
+                raise GitConflict("entrada de tree não verificável")
+            result.append(TreeEntry(path, mode, object_id, object_type))
+        return tuple(result)
+
+    def write_blob(self, repository: Path, object_id: str, destination: Path,
+                   max_bytes: int) -> tuple[int, str]:
+        """Stream one Git blob to a new file and verify its native object ID."""
+        if (not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", object_id)
+                or type(max_bytes) is not int or max_bytes < 0):
+            raise GitConflict("blob OID ou limite inválido")
+        root = self._rooted(repository)
+        size_raw = self._run(root, "cat-file", "-s", object_id).strip()
+        if not size_raw.isdigit():
+            raise GitError("Git retornou tamanho de blob inválido")
+        expected_size = int(size_raw)
+        if expected_size > max_bytes:
+            raise GitConflict("blob excede quota do snapshot")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() or destination.is_symlink():
+            raise GitConflict("destino do blob já existe")
+        algorithm = "sha256" if len(object_id) == 64 else "sha1"
+        object_hash = hashlib.new(algorithm)
+        object_hash.update(b"blob " + str(expected_size).encode("ascii") + b"\0")
+        content_hash = hashlib.sha256()
+        process = None
+        try:
+            with destination.open("xb") as output:
+                env = self._environment()
+                argv = [str(self.executable), "-c", f"core.hooksPath={self._empty_hooks}",
+                        "-c", "commit.gpgsign=false", "--literal-pathspecs", "cat-file", "blob", object_id]
+                process = subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False)
+                copied = 0
+                exceeded = threading.Event()
+                failures: list[BaseException] = []
+
+                def drain_blob() -> None:
+                    nonlocal copied
+                    assert process is not None and process.stdout is not None
+                    try:
+                        while chunk := process.stdout.read(64 * 1024):
+                            if copied + len(chunk) > min(max_bytes, expected_size):
+                                exceeded.set()
+                                process.kill()
+                                break
+                            output.write(chunk)
+                            object_hash.update(chunk)
+                            content_hash.update(chunk)
+                            copied += len(chunk)
+                    except BaseException as exc:
+                        failures.append(exc)
+                        try:
+                            process.kill()
+                        except OSError:
+                            pass
+                    finally:
+                        process.stdout.close()
+
+                reader = threading.Thread(target=drain_blob, name="agentflow-git-blob-reader",
+                                          daemon=True)
+                reader.start()
+                try:
+                    process.wait(timeout=self.TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                    raise GitError("leitura de blob excedeu timeout")
+                finally:
+                    reader.join(timeout=self.TIMEOUT)
+                    if reader.is_alive():
+                        process.kill()
+                        reader.join()
+                if exceeded.is_set():
+                    raise GitConflict("blob excede a quota do snapshot")
+                if failures:
+                    raise GitError("falha ao gravar blob materializado") from failures[0]
+            if process.returncode != 0:
+                raise GitError("Git não conseguiu ler blob")
+            actual_size = destination.stat().st_size
+            if actual_size != expected_size or copied != expected_size or actual_size > max_bytes:
+                raise GitConflict("tamanho do blob mudou durante leitura")
+            if object_hash.hexdigest() != object_id:
+                raise GitConflict("conteúdo do blob não corresponde ao OID do tree")
+            return actual_size, "sha256:" + content_hash.hexdigest()
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
 
     def verify_no_changes(self, workspace: Workspace) -> bool:
         """Confirm the workspace still matches its recorded head and has no staged/unstaged files."""

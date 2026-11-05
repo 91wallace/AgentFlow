@@ -12,7 +12,7 @@ from typing import Iterator
 from uuid import uuid4
 
 from agentflow.planning import Plan, canonical, digest
-from agentflow.planning.loader import task_data
+from agentflow.planning.loader import command_data, gate_data, task_data
 
 from .contracts import (ConflictError, EvidenceInput, IntegrityError, TaskState,
                         Transition, TransitionError)
@@ -20,6 +20,66 @@ from .contracts import (ConflictError, EvidenceInput, IntegrityError, TaskState,
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def current_verified_gate_criteria(db: sqlite3.Connection, project_id: str,
+                                   task_id: str, revision: int,
+                                   definition_digest: str) -> set[str]:
+    """Return only verified criteria still bound to the current verified checkpoint."""
+    current = db.execute(
+        "SELECT definition_revision,revalidation_required FROM tasks "
+        "WHERE project_id=? AND task_id=?", (project_id, task_id)).fetchone()
+    if current != (revision, 0):
+        return set()
+    verified: set[str] = set()
+    rows = db.execute(
+        "SELECT criterion_id,payload FROM evidence WHERE project_id=? AND task_id=? "
+        "AND definition_revision=? AND kind='verified' AND passed=1",
+        (project_id, task_id, revision)).fetchall()
+    for criterion_id, encoded in rows:
+        try:
+            payload = json.loads(encoded)
+            run_id, gate_id = payload["validation_run_id"], payload["gate_id"]
+            run = db.execute(
+                "SELECT definition_revision,definition_digest,status,checkpoint_operation_id,"
+                "commit_oid,tree_oid,workspace_id FROM validation_runs "
+                "WHERE validation_run_id=? AND project_id=? AND task_id=?",
+                (run_id, project_id, task_id)).fetchone()
+            if run is None or run[:3] != (revision, definition_digest, "passed"):
+                continue
+            checkpoint = db.execute(
+                "SELECT c.checkpoint_id,c.verified,c.commit_oid,c.tree_oid,o.status "
+                "FROM git_checkpoints c JOIN git_operations o USING(operation_id) "
+                "WHERE c.operation_id=?", (run[3],)).fetchone()
+            workspace = db.execute(
+                "SELECT current_head_oid,status FROM workspaces WHERE workspace_id=?",
+                (run[6],)).fetchone()
+            snapshot = db.execute(
+                "SELECT snapshot_digest,state FROM validation_snapshots "
+                "WHERE validation_run_id=?", (run_id,)).fetchone()
+            gate = db.execute(
+                "SELECT status,gate_definition_digest,criterion_ids_json,validator_id,"
+                "validator_version,validator_digest,snapshot_digest FROM validation_gate_results "
+                "WHERE validation_run_id=? AND gate_id=?", (run_id, gate_id)).fetchone()
+            if (checkpoint is None or workspace is None or snapshot is None or gate is None
+                    or checkpoint != (payload["checkpoint_id"], 1, run[4], run[5], "verified")
+                    or workspace != (run[4], "active")
+                    or snapshot != (payload["snapshot_digest"], "verified")
+                    or gate[0] != "passed" or gate[1] != payload["gate_definition_digest"]
+                    or gate[3] != payload["validator_id"]
+                    or gate[4] != payload["validator_version"]
+                    or gate[5] != payload["validator_digest"]
+                    or gate[6] != payload["snapshot_digest"]
+                    or criterion_id not in json.loads(gate[2])
+                    or payload["criterion_id"] != criterion_id
+                    or payload["definition_revision"] != revision
+                    or payload["definition_digest"] != definition_digest
+                    or payload["commit_oid"] != run[4] or payload["tree_oid"] != run[5]):
+                continue
+            verified.add(criterion_id)
+        except (KeyError, TypeError, ValueError, sqlite3.Error):
+            continue
+    return verified
 
 
 SCHEMA = (
@@ -57,19 +117,25 @@ GIT_SCHEMA = (
     "CREATE INDEX git_events_by_operation ON git_events(operation_id,event_id)",
 )
 
+from .validation_schema import VALIDATION_SCHEMA
+
 
 class SQLiteStore:
-    def __init__(self, path: Path, *, execution: bool = False, git: bool = False):
+    def __init__(self, path: Path, *, execution: bool = False, git: bool = False,
+                 validation: bool = False):
         self.path = path
         self.execution = execution
         self.git = git
+        self.validation = validation
+        if validation and not (execution and git):
+            raise IntegrityError("validação exige esquemas de execução e Git")
         self.existed = path.exists()
         if not path.parent.is_dir():
             raise IntegrityError(f"diretório inexistente: {path.parent}")
         try:
             self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 3:
+            if version > (4 if validation else 3):
                 raise IntegrityError(f"versão SQLite futura: {version}")
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.execute("PRAGMA foreign_keys=ON")
@@ -126,12 +192,16 @@ class SQLiteStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 3:
+        target = 4 if self.validation else (3 if self.git else (2 if self.execution else 1))
+        supported_max = 4 if self.validation else 3
+        if version > supported_max:
             raise IntegrityError(f"versão SQLite futura: {version}")
         if version:
             recorded = self.db.execute("SELECT version FROM schema_migrations").fetchall()
             if recorded != [(number,) for number in range(1, version + 1)]:
                 raise IntegrityError("histórico de migração divergente")
+            if version > target:
+                return
         else:
             tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
             if tables:
@@ -148,26 +218,69 @@ class SQLiteStore:
                 raise IntegrityError(f"migração inicial falhou: {exc}") from exc
             version = 1
 
-        target = 3 if self.git else (2 if self.execution else 1)
         while version < target:
             next_version = version + 1
             self._backup()
-            statements = EXECUTION_SCHEMA if next_version == 2 else GIT_SCHEMA
+            statements = (EXECUTION_SCHEMA if next_version == 2 else GIT_SCHEMA
+                          if next_version == 3 else VALIDATION_SCHEMA)
             try:
                 with self.transaction() as db:
                     for statement in statements:
                         db.execute(statement)
+                    self._assert_integrity(db)
                     db.execute("INSERT INTO schema_migrations VALUES(?,?)", (next_version, now()))
                     db.execute(f"PRAGMA user_version={next_version}")
+                    self._assert_integrity(db)
             except (sqlite3.DatabaseError, ConflictError) as exc:
                 raise IntegrityError(f"migração v{next_version} falhou: {exc}") from exc
             version = next_version
 
     def check_integrity(self) -> None:
-        if self.db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        self._assert_integrity(self.db)
+
+    @staticmethod
+    def _assert_integrity(db: sqlite3.Connection) -> None:
+        if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise IntegrityError("integrity_check falhou")
-        if self.db.execute("PRAGMA foreign_key_check").fetchall():
+        if db.execute("PRAGMA foreign_key_check").fetchall():
             raise IntegrityError("foreign_key_check falhou")
+
+    @staticmethod
+    def _register_validation_ids(db: sqlite3.Connection, plan: Plan,
+                                 plan_revision: int) -> None:
+        commands: dict[str, list[dict]] = {}
+        gates: dict[str, dict] = {}
+        for command in plan.specification.validation_commands:
+            commands.setdefault(command.command_id, []).append(command_data(command))
+        for task in plan.tasks:
+            for gate in task.gates:
+                gates[gate.gate_id] = {"task_id": task.id, "gate": gate_data(gate)}
+        definitions = {
+            ("command", stable_id): digest(sorted(items, key=lambda item: item["platform"]))
+            for stable_id, items in commands.items()
+        }
+        definitions.update({("gate", stable_id): digest(value)
+                            for stable_id, value in gates.items()})
+        existing = {(row[0], row[1]): (row[2], row[3]) for row in db.execute(
+            "SELECT object_type,stable_id,active,definition_digest FROM validation_id_registry WHERE project_id=?",
+            (plan.specification.project_id,))}
+        for (kind, stable_id), definition_digest in definitions.items():
+            previous = existing.get((kind, stable_id))
+            if previous and not previous[0]:
+                raise ConflictError(f"ID {kind} já encerrado não pode ser reutilizado: {stable_id}")
+            if previous:
+                db.execute("UPDATE validation_id_registry SET last_seen_revision=?,definition_digest=?,active=1 WHERE project_id=? AND object_type=? AND stable_id=?",
+                           (plan_revision, definition_digest, plan.specification.project_id,
+                            kind, stable_id))
+            else:
+                db.execute("INSERT INTO validation_id_registry(project_id,object_type,stable_id,first_seen_revision,last_seen_revision,definition_digest,active) VALUES(?,?,?,?,?,?,1)",
+                           (plan.specification.project_id, kind, stable_id, plan_revision,
+                            plan_revision, definition_digest))
+        active_keys = set(definitions)
+        for kind, stable_id in existing:
+            if (kind, stable_id) not in active_keys:
+                db.execute("UPDATE validation_id_registry SET active=0 WHERE project_id=? AND object_type=? AND stable_id=?",
+                           (plan.specification.project_id, kind, stable_id))
 
     def _project_id(self) -> str:
         rows = self.db.execute("SELECT project_id FROM projects").fetchall()
@@ -183,19 +296,23 @@ class SQLiteStore:
             existing = db.execute("SELECT project_id,spec_digest,tasks_digest,plan_revision FROM projects").fetchall()
             if existing and existing[0][0] != project:
                 raise ConflictError("banco pertence a outro projeto")
-            if existing and (existing[0][1], existing[0][2]) == (spec_hash, task_hash):
+            unchanged = bool(existing and (existing[0][1], existing[0][2]) == (spec_hash, task_hash))
+            plan_revision = existing[0][3] if unchanged else (existing[0][3] + 1 if existing else 1)
+            if unchanged:
+                if self.validation:
+                    self._register_validation_ids(db, plan, plan_revision)
                 return
             if not existing:
                 db.execute("INSERT INTO projects VALUES(?,?,?,?,?)", (project, spec_hash, task_hash, 1, now()))
-                plan_revision = 1
             else:
-                plan_revision = existing[0][3] + 1
                 old_ids = {row[0] for row in db.execute("SELECT task_id FROM tasks")}
                 new_ids = {task.id for task in plan.tasks}
                 if old_ids - new_ids:
                     raise ConflictError(f"IDs com histórico removidos: {', '.join(sorted(old_ids - new_ids))}")
                 db.execute("UPDATE projects SET spec_digest=?,tasks_digest=?,plan_revision=? WHERE project_id=?",
                            (spec_hash, task_hash, plan_revision, project))
+            if self.validation:
+                self._register_validation_ids(db, plan, plan_revision)
 
             for task in plan.tasks:
                 snapshot = canonical({"task": task_data(task), "spec_digest": spec_hash})
@@ -381,7 +498,15 @@ class SQLiteStore:
                 snapshot = db.execute("SELECT definition_snapshot FROM task_definitions WHERE project_id=? AND task_id=? AND definition_revision=?", (project, command.task_id, definition_revision)).fetchone()[0]
                 task_definition = json.loads(snapshot)["task"]
                 criteria = {item["id"] for item in task_definition["acceptance_criteria"]}
-                verified = {row[0] for row in db.execute("SELECT criterion_id FROM evidence WHERE project_id=? AND task_id=? AND definition_revision=? AND kind='verified' AND passed=1", (project, command.task_id, definition_revision))}
+                if task_definition.get("gates"):
+                    current_digest = db.execute(
+                        "SELECT definition_digest FROM task_definitions WHERE project_id=? "
+                        "AND task_id=? AND definition_revision=?",
+                        (project, command.task_id, definition_revision)).fetchone()[0]
+                    verified = current_verified_gate_criteria(
+                        db, project, command.task_id, definition_revision, current_digest)
+                else:
+                    verified = {row[0] for row in db.execute("SELECT criterion_id FROM evidence WHERE project_id=? AND task_id=? AND definition_revision=? AND kind='verified' AND passed=1", (project, command.task_id, definition_revision))}
                 versioned_paths = tuple(task_definition.get("versioned_paths", ()))
                 if command.destination == "completed" and before == "blocked" and not versioned_paths:
                     raise TransitionError("conclusão direta bloqueada; tarefa sem fluxo Git versionado")

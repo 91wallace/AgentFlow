@@ -67,6 +67,14 @@ class Checkpoint:
     actor_email: str
 
 
+@dataclass(frozen=True)
+class TreeEntry:
+    path: str
+    mode: int
+    object_id: str
+    object_type: str
+
+
 class LockLease(Protocol):
     owner: dict[str, object] | None
     previous_owner: dict[str, object] | None
@@ -83,6 +91,9 @@ class GitProvider(Protocol):
     def create_workspace(self, request: WorkspaceRequest, workspace_id: str) -> Workspace: ...
     def create_checkpoint(self, workspace: Workspace, request: CheckpointRequest) -> Checkpoint: ...
     def verify_checkpoint(self, workspace: Workspace, checkpoint: Checkpoint) -> bool: ...
+    def tree_entries(self, repository: Path, tree_oid: str) -> tuple[TreeEntry, ...]: ...
+    def write_blob(self, repository: Path, object_id: str, destination: Path,
+                   max_bytes: int) -> tuple[int, str]: ...
     def verify_no_changes(self, workspace: Workspace) -> bool: ...
     def reconcile_operation(self, workspace: Workspace, kind: str, operation_id: str,
                             request_json: str) -> Workspace | Checkpoint | None: ...

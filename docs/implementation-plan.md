@@ -29,7 +29,7 @@ Instalação reproduzível com Python 3.11+; `agentflow --version`, `init` e `do
 | 2 — Planejamento e estado | Fase 1 | Especificações e tarefas versionadas, dependências, esquema SQLite, transições e migrações; testes de transação e reabertura. |
 | 3 — Execução local | Fase 2 | Adaptador Codex CLI, runtime local, políticas de tentativa e timeout, validação e evidências; execução de tarefa isolada por testes de contrato. |
 | 4 — Recuperação e Git | Fase 3 | Reconciliação após interrupção, prevenção de duplicidade, branches e checkpoints explícitos; testes de falha entre transições. |
-| 5 — Docker e entrega | Fase 4 | Runtime Docker opcional, isolamento configurável, builds e implantação sob política explícita; teste de paridade local/contêiner. |
+| 5 — Validação, Docker e entrega | Fase 4 | Validação independente e quality gates sobre checkpoints imutáveis; runtime Docker opcional, isolamento configurável, builds rastreáveis e plano de entrega sob política explícita; sem deploy automático. |
 | 6 — Ecossistema | Fase 5 | Adaptadores de outros agentes e eventual integração opcional com Vibe Coding Toolkit após revisão legal e técnica. |
 
 ## Questões e riscos a resolver antes de implementar
@@ -180,3 +180,42 @@ Estado: fechamento arquitetural consolidado, aguardando revisão antes de códig
 Worktree isola arquivos de trabalho, mas compartilha repositório Git comum e não é sandbox contra processo com as permissões do usuário; race com processo externo, hooks/filters e particularidades de case/Unicode podem impedir garantia absoluta. Recuperação de commit efetuado sem confirmação SQLite pode requerer resolução humana. Locks dependem de identidade confiável por sistema operacional. Esses riscos exigem detecção e falha segura, sem prometer atomicidade distribuída.
 
 Estado: **F4-01 a F4-09 implementadas localmente; F4-10 em homologação local**. A CI remota nas versões Python 3.11, 3.12 e 3.13 depende da publicação autorizada da branch. Não foram feitos commit, push ou merge nesta etapa.
+
+## Fase 5 — validação independente, quality gates e entrega
+
+Estado: **F5-01 concluída antes de qualquer código**: limites, perfis/capacidades, retenção, limpeza e política de segredos fixados em arquitetura/ADR. Ver [parâmetros operacionais](architecture.md#f5-01--parâmetros-operacionais-fixados), [arquitetura](architecture.md#fase-5--validação-independente-quality-gates-e-entrega) e [ADR 0005](decisions/0005-phase-5-validation-delivery.md). Nenhum outro componente foi implementado antes deste gate.
+
+### Ordem definitiva e critérios F5-01 a F5-10
+
+| ID | Tarefa | Dependências | Critério de aceite verificável |
+| --- | --- | --- | --- |
+| F5-01 | Fixar limites operacionais por plataforma, perfis/capacidades, rede, segredos, quotas, retenção e limpeza. | F4 | **Concluída antes do código:** stdout+stderr 8 MiB/gate e 64 MiB/run; artefato 256 MiB cada/1 GiB run/10 GiB projeto; snapshot 2 GiB cada/10 GiB projeto; temp 4 GiB/run; total operacional 20 GiB/projeto; CPU 2 default/8 max; memória 4 GiB default/16 GiB max; processos 64 default/256 max; timeout 600/3600 s; logs 30 dias, snapshots 7 dias, artifacts 30 dias. Capacidades não verificadas reportadas `unavailable`; bloqueio quando requeridas. Testes de F5-01 registrados no progresso. |
+| F5-02 | Definir contratos imutáveis e protocolos: `ValidationRequest`, snapshots, `GateDefinition/Result`, `Validator`, `ValidationRunner`, `Runtime`, `BuildRequest/Result`, `DeliveryRequest/Result`. | F5-01 | Contratos substituíveis; cada request/result carrega IDs/digests e identidade de política/runtime definidos no ADR; core não importa adaptadores concretos. |
+| F5-03 | Evoluir TOML: `spec.toml` v2 para allowlist de comandos por projeto; `tasks.toml` v3 para gates estáveis, critérios, DAG, política e limites. | F5-02 | v1/v2 continuam legíveis; allowlist vazia em spec v1 e zero gates em tasks v1/v2; rejeitar IDs reutilizados/duplicados, comandos livres, referências inválidas, ciclos e limites fora de faixa; snapshot canônico estável. |
+| F5-04 | Migrar SQLite v3→v4 para validações, snapshots, resultados, builds, entregas, operações e eventos. | F5-03 | Backup consistente; transação/rollback integral; FKs e `integrity_check`; v3 intocado após falha; versão futura recusada; histórico F2–F4 preservado; uma validação ativa por projeto e idempotência pelo digest da solicitação. |
+| F5-05 | Materializar snapshot imutável do commit/tree de checkpoint verificado. | F5-03, F5-04 | Manifesto de paths/modos/blob OIDs e digest coincide com Git tree; sem filtros/hooks; symlink/submodule/path não suportado é rejeitado; workspace de execução/original não é lido como fonte nem modificado. |
+| F5-06 | Implementar scheduler sequencial, estados, preflight, limites, cancelamento e recovery de gate/run. | F5-02 a F5-05 | Uma validação ativa por projeto; ordem determinística; default timeout 600s/max 3600s; dependentes de qualquer resultado não `passed` viram `not_run`; crash/timeout/cancelamento nunca passa nem repete automaticamente. |
+| F5-07 | Implementar runtimes local e Docker opcionais, validadores iniciais, capabilities, sanitização e logs. | F5-01, F5-05, F5-06 | Só executáveis allowlisted e request explícito; Docker exige imagem digest + executable do container e verifica HostConfig/mounts; source read-only/output isolado; capabilities `supported` só liberam preflight, gate exige `enforced`; indisponível bloqueia política obrigatória; sem credenciais herdadas; Docker não é requisito. |
+| F5-08 | Integrar evidências com revisão/checkpoint/gate/validator e ação separada de conclusão. | F5-04 a F5-07 | Somente evidência verificada vigente satisfaz critérios; qualquer alteração de revisão/checkpoint/config/gate/validator invalida; código de saída ou artefato isolado não conclui. |
+| F5-09 | Implementar build e proveniência; delivery provider e autorização específica por operação/destino, com recovery conservador. | F5-04 a F5-08 | Build registra source/toolchain/config/dependencies/artifact SHA-256; artifact adulterado recusado; delivery desabilitada por default; autorização, gates e destino exatos são necessários; `unknown` bloqueia retry. |
+| F5-10 | CLI explícita, documentação, testes de regressão, pacote, CI e homologação. | F5-01 a F5-09 | CI Linux/Windows Python 3.11/3.12/3.13; smoke package; testes de contrato/migração/recovery/isolamento/paridade; nenhuma validação/build/delivery implícita, agente real ou deploy automático. |
+
+### Matriz de testes obrigatória
+
+1. **TOML e compatibilidade:** schemas v1/v2 mantidos, evolução v2/v3, allowlist vazia, ID estável e não reutilizável, comando não autorizado, placeholders/injection, DAG, ciclo e referência ausente.
+2. **Migração SQLite:** backup por API consistente em WAL, falha injetada em cada DDL/copy/version update, rollback v3 íntegro, FK, integrity check, versão futura, reabertura e dados/histórico anteriores preservados.
+3. **Concorrência/idempotência:** processos simultâneos no mesmo projeto; somente um run ativo; operação repetida idêntica reutiliza resultado; digest divergente conflita; nenhum lock longo durante subprocesso.
+4. **Snapshot:** commit/tree e manifesto iguais; blob OID/digest; mutação pós-criação detectada; mudança de branch/workspace original irrelevante; hooks, filters, autocrlf, symlink, hardlink, traversal, submodule e path Unicode/caractere especial.
+5. **Estados e recovery:** todos os edges válidos/inválidos; dependentes `not_run` após fail/cancel/inconclusive; falha de spawn, timeout, cancelamento, crash pré/pós-intenção/pós-processo/pré-SQLite; reconciliação idempotente e sem retry de resultado desconhecido.
+6. **Allowlist/toolchain:** argv separado sem shell; executable realpath/hash/version; PATH alterado, wrapper, alias, Git hooks/filters/config executável; gate não iniciado só por existir no TOML.
+7. **Runtime e segurança:** local e Docker com capabilities reportadas; rede off por default onde controlável; exceção sem autorização negada; CPU/memória aplicadas ou `unavailable`; imagem por digest; read-only source, env mínimo, nenhum segredo herdado.
+8. **Mutação/artefatos:** gates que tentam alterar/deletar source, symlink/escape no output, arquivo operacional/credencial, quota, truncagem, hash adulterado; fonte e checkpoint persistem iguais; mutação resulta failed/inconclusive, nunca pass.
+9. **Logs/evidências:** sanitização de tokens conhecidos, truncagem bounded, redaction failure, retenção/expiração; evidência stale por revisão/checkpoint/gate/validator/policy não autoriza conclusão.
+10. **Build/delivery:** proveniência completa e digest; builder/config divergente; destino ou autorização divergente; ausência de autorização bloqueia; falha após efeito vira unknown, sem repetição automática.
+11. **Plataforma:** Windows/Linux; recursos não suportados reportados; Docker ausente; paths Unicode/case; CI Python 3.11–3.13; wheel instalada e smoke; nenhum Codex/agente ou deploy real nos testes.
+
+### Riscos residuais e critérios de prontidão
+
+Runtime local sob o mesmo usuário não é sandbox: não oferece contenção forte de filesystem/rede quando o OS não expõe controle confiável. Docker amplia isolamento, mas depende de daemon, kernel, image supply-chain, configuração e mounts. ACL, symlinks, permissões, locks, limites de recursos, signals e identidade de processo diferem entre Linux e Windows; capacidade indisponível deve ser explícita e bloqueada conforme política. Redaction não identifica todos os segredos. Builds/tests podem ser não determinísticos; proveniência e digests provam entradas, não comportamento correto. Entrega remota pode ter efeitos irreversíveis e resposta perdida; reconciliação pode exigir operador humano. Migração e retenção podem exigir recuperação manual.
+
+Pronto para implementação após aprovação deste fechamento, desde que F5-01 fixe e teste valores/limites mensuráveis de recursos, logs, artefatos e retenção para cada backend/plataforma antes de F5-02/F5-03 alterarem interfaces e dados. Nenhum risco de runtime local pode ser descrito como isolamento garantido.

@@ -26,6 +26,14 @@ from .git.provider import GitLocalProvider
 from .core.git import GitCoordinator
 from .state.git import GitStateStore
 from .state.contracts import Transition
+from .state.validation import ValidationStateStore
+from .validation import (DockerRuntime, LocalProcessRuntime, RuntimeLimits,
+                         RuntimeProfile, SnapshotManager, ValidationRequest,
+                         ValidationScheduler, policy_snapshot,
+                         StructuredGateValidatorFactory,
+                         cleanup_validation_storage)
+from .planning import canonical
+from .planning.loader import command_data, gate_data
 
 
 class _NeverCancel:
@@ -37,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentflow")
     parser.add_argument("--version", action="version", version=f"agentflow {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "doctor", "plan", "state", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete"):
+    for name in ("init", "doctor", "plan", "state", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup"):
         command = commands.add_parser(name)
         command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
         if name == "execute":
@@ -47,6 +55,15 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--approval", required=True, choices=("never", "on-request"))
             command.add_argument("--timeout", type=int, default=1800)
             command.add_argument("--retry-reason", default="", help="decisão humana de repetição após reconciliar o workspace")
+        if name == "validate":
+            command.add_argument("--task", required=True)
+            command.add_argument("--gate", action="append", required=True,
+                                 help="ID do gate; informe também suas dependências")
+            command.add_argument("--operation-id", required=True)
+            command.add_argument("--runtime", required=True,
+                                 choices=("local-explicit", "docker-isolated"))
+            command.add_argument("--timeout", type=int, default=600)
+            command.add_argument("--allow-unconfined-network", action="store_true")
         if name == "cancel":
             command.add_argument("--attempt", required=True)
         if name == "cleanup":
@@ -79,6 +96,39 @@ def main(argv: list[str] | None = None) -> int:
             plan = load_plan(root / ".agentflow")
             for task in inspect_state(root / ".agentflow" / "state.sqlite3", plan):
                 print(f"{task.task_id}: {task.status} (revisão {task.definition_revision})")
+            return 0
+        if args.command == "validation-state":
+            state_path = root / ".agentflow" / "state.sqlite3"
+            if not state_path.is_file():
+                raise StateError("banco operacional de validação não existe")
+            with ValidationStateStore(state_path) as store:
+                rows = store.db.execute(
+                    "SELECT validation_run_id,status,task_id,definition_revision,checkpoint_operation_id "
+                    "FROM validation_runs ORDER BY created_at,validation_run_id").fetchall()
+                for run_id, status, task_id, revision, checkpoint_operation in rows:
+                    checkpoint = store.db.execute(
+                        "SELECT checkpoint_id,commit_oid,tree_oid FROM git_checkpoints WHERE operation_id=?",
+                        (checkpoint_operation,)).fetchone()
+                    print(f"{run_id}: {status} task={task_id} revision={revision} "
+                          f"checkpoint={checkpoint[0] if checkpoint else 'unknown'}")
+                    for gate_id, gate_status, validator, version, digest_value in store.db.execute(
+                            "SELECT gate_id,status,validator_id,validator_version,validator_digest "
+                            "FROM validation_gate_results WHERE validation_run_id=? ORDER BY gate_id",
+                            (run_id,)):
+                        print(f"  {gate_id}: {gate_status} validator={validator}@{version} {digest_value}")
+            return 0
+        if args.command == "validation-cleanup":
+            state_path = root / ".agentflow" / "state.sqlite3"
+            if not state_path.is_file():
+                raise StateError("banco operacional de validação não existe")
+            with ValidationStateStore(state_path) as store:
+                removed = cleanup_validation_storage(
+                    store, root / ".agentflow" / "snapshots",
+                    root / ".agentflow" / "validation-output",
+                    root / ".agentflow" / "artifacts")
+            print(f"Payloads locais removidos: {len(removed)}")
+            for item in removed:
+                print(f"  {item}")
             return 0
         if args.command == "workspaces":
             with GitStateStore(root / ".agentflow" / "state.sqlite3") as store:
@@ -210,6 +260,74 @@ def main(argv: list[str] | None = None) -> int:
                         store.set_validation(attempt.attempt_id, False, (), str(exc))
                 print(f"Tentativa {attempt.attempt_id}: {result.status}; tarefa exige validação/evidências.")
                 return 0 if result.status == "process_succeeded" else 1
+        if args.command == "validate":
+            if not 1 <= args.timeout <= 3600:
+                raise StateError("timeout de gate deve estar entre 1 e 3600 segundos")
+            plan = load_plan(root / ".agentflow")
+            task = next((item for item in plan.tasks if item.id == args.task), None)
+            if task is None or not task.gates:
+                raise StateError("tarefa desconhecida ou sem gates definidos")
+            selected = set(args.gate)
+            known = {gate.gate_id: gate for gate in task.gates}
+            if not selected <= known.keys() or not selected:
+                raise StateError("seleção contém gate desconhecido")
+            missing = {dependency for gate_id in selected
+                       for dependency in known[gate_id].depends_on} - selected
+            if missing:
+                raise StateError("informe explicitamente as dependências: " + ", ".join(sorted(missing)))
+            selected_gates = [known[gate_id] for gate_id in plan.gate_order
+                              if gate_id in selected]
+            command_ids = {gate.command_id for gate in selected_gates}
+            commands = [command for command in plan.specification.validation_commands
+                        if command.command_id in command_ids]
+            criteria = [{"id": item.id, "description": item.description}
+                        for item in sorted(task.acceptance_criteria, key=lambda value: value.id)
+                        if any(item.id in gate.criterion_ids for gate in selected_gates)]
+            gate_config = {"version": 1,
+                           "gates": [gate_data(gate) for gate in selected_gates],
+                           "commands": [command_data(item) for item in sorted(
+                               commands, key=lambda value: (value.command_id, value.platform))],
+                           "criteria": criteria}
+            gate_snapshot = canonical(gate_config)
+            profile = RuntimeProfile(args.runtime)
+            limits = RuntimeLimits(timeout_seconds=args.timeout)
+            policy_json, policy_digest = policy_snapshot(
+                profile, limits, allow_unconfined_network=args.allow_unconfined_network)
+            run_id = "run-" + hashlib.sha256(args.operation_id.encode("utf-8")).hexdigest()[:32]
+            state_path = root / ".agentflow" / "state.sqlite3"
+            with GitLocalProvider() as provider, ValidationStateStore(state_path) as store:
+                store.import_plan(plan)
+                state = next((item for item in store.list_tasks() if item.task_id == args.task), None)
+                workspace = (store.workspace_for_task(plan.specification.project_id, args.task,
+                                                      state.definition_revision) if state else None)
+                if workspace is None:
+                    raise StateError("workspace isolado da tarefa não encontrado")
+                checkpoint = store.latest_checkpoint(workspace.workspace_id)
+                if checkpoint is None or not checkpoint.verified:
+                    raise StateError("checkpoint verificado obrigatório")
+                definition_digest = store.db.execute(
+                    "SELECT definition_digest FROM task_definitions WHERE project_id=? AND task_id=? AND definition_revision=?",
+                    (plan.specification.project_id, args.task,
+                     state.definition_revision)).fetchone()[0]
+                request = ValidationRequest(
+                    args.operation_id, run_id, plan.specification.project_id, args.task,
+                    state.definition_revision, definition_digest, checkpoint.checkpoint_id,
+                    checkpoint.commit_oid, checkpoint.tree_oid, workspace.workspace_id,
+                    gate_snapshot, digest(gate_config), policy_json, policy_digest,
+                    tuple(gate.gate_id for gate in selected_gates), profile,
+                    args.allow_unconfined_network, requested_by=os.environ.get(
+                        "USERNAME", os.environ.get("USER", "local-user")))
+                runtime = (DockerRuntime() if profile is RuntimeProfile.DOCKER_ISOLATED
+                           else LocalProcessRuntime())
+                scheduler = ValidationScheduler(
+                    store, provider, runtime, StructuredGateValidatorFactory(task),
+                    SnapshotManager(provider), root / ".agentflow" / "snapshots",
+                    root / ".agentflow" / "validation-output")
+                result = scheduler.run(request, workspace, checkpoint, plan)
+                print(f"Validação {result.validation_run_id}: {result.status.value}")
+                for gate in result.results:
+                    print(f"{gate.gate_id}: {gate.status.value} ({gate.validator_id}@{gate.validator_version})")
+                return 0 if result.status.value == "passed" else 1
         config = load_config(root / ".agentflow" / "config.toml")
         checks = diagnose(config)
         for check in checks:
