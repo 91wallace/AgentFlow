@@ -54,7 +54,7 @@ def test_plan_is_canonical_and_ordered(tmp_path):
     (lambda text: text.replace('depends_on = ["first"]', 'depends_on = ["missing"]'), "referência ausente"),
     (lambda text: text.replace('depends_on = ["first"]', 'depends_on = ["second"]'), "ciclo"),
     (lambda text: text.replace('description = "First works"', 'description = "First works"\n[[tasks]]\nid = "first"\ntitle = "Duplicate"\ndescription = "Duplicate"\n[[tasks.acceptance_criteria]]\nid = "ok"\ndescription = "Duplicate"'), "duplicado"),
-    (lambda text: text.replace('schema_version = 1', 'schema_version = 3'), "versões suportadas"),
+    (lambda text: text.replace('schema_version = 1', 'schema_version = 4'), "versões suportadas"),
     (lambda text: text.replace('id = "first"', 'id = "Bad ID"'), "texto ID"),
     (lambda text: text.replace('description = "First works"', 'description = ""'), "não vazio"),
 ])
