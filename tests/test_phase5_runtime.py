@@ -51,7 +51,7 @@ def test_local_runtime_bounds_logs_and_hashes_the_full_stream(tmp_path):
     payload_size = 200_000
     request = make_request(tmp_path, ("-c", f"print('x' * {payload_size})"), output_limit=1024)
     result = LocalProcessRuntime().run(request, Event(), lambda _: None, lambda _: None)
-    raw = ("x" * payload_size + "\r\n").encode()
+    raw = ("x" * payload_size + os.linesep).encode()
     assert result.exit_code == 0
     assert result.truncated
     assert result.stdout_bytes == len(raw)

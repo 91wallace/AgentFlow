@@ -85,9 +85,15 @@ Adicionar evidência por tarefa após cada implementação e teste relevante. Fa
 
 ### Fechamento de validação local F5-10
 
-- Suíte completa final: `python -m pytest -q` — 181 passaram em 219,99 s.
+- Suíte completa final após a correção multiplataforma: `python -m pytest -q` — 181 passaram em 222,09 s; o teste focado passou (1 teste).
 - `git diff --check`: passou; Git emitiu somente avisos de normalização LF/CRLF no Windows.
 - Smoke do pacote editável: `agentflow --version` retornou `agentflow 0.1.0`; `agentflow validate --help` e imports de `agentflow`, `agentflow.validation` e `agentflow.delivery` passaram.
-- Nenhum arquivo foi staged ou commitado; nenhuma operação remota foi executada. O diretório `autonomous-development-runner/`, `.agentflow/` local e alterações preexistentes foram preservados.
+- Commit inicial publicado: `4c1b2e73edb4058aa604428aff0293665e34eda6`; PR #5 aberto contra `main`. O diretório `autonomous-development-runner/`, `.agentflow/` local e alterações preexistentes foram preservados e ficaram fora do commit.
 - Nesta publicação, arquivos compartilhados de arquitetura/plano são staged apenas com hunks da Fase 5; atualizações locais de encerramento F4, progresso F2–F4 e o ADR 0004 permanecem fora do commit.
-- Limitação de homologação: CI Python 3.11/3.12/3.13 e Linux dependem dos jobs remotos após o push. Docker foi exercitado apenas com engine simulado; nenhum daemon real foi usado.
+- Limitação de homologação: Docker foi exercitado apenas com engine simulado; nenhum daemon real foi usado.
+
+### Primeira execução da CI e correção de regressão
+
+- PR #5 executou o workflow `CI` em duplicidade (eventos `push` e `pull_request`). Os dois conjuntos falharam nos três jobs Python 3.11, 3.12 e 3.13 no teste `test_local_runtime_bounds_logs_and_hashes_the_full_stream`.
+- Os logs dos jobs mostraram que o coletor contou os bytes reais no Linux (`200001`), enquanto a expectativa do teste codificava CRLF (`200002`). A diferença era somente a newline de `print`; não houve defeito no limite nem no digest do stream.
+- Regressão corrigida em `tests/test_phase5_runtime.py`: expectativa agora usa `os.linesep`, mantendo validação exata de tamanho e SHA-256 sob Windows/Linux. O teste focado passou localmente (1 teste) e a suíte completa pós-correção passou (181 testes em 222,09 s). Novo commit e nova CI serão publicados antes de concluir a homologação.
