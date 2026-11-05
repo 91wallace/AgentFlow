@@ -23,7 +23,7 @@ def test_schema_reopens_with_integrity(tmp_path):
 def test_future_version_is_rejected_without_change(tmp_path):
     path = tmp_path / "state.sqlite3"
     with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version=2")
+        db.execute("PRAGMA user_version=3")
     before = path.read_bytes()
     with pytest.raises(IntegrityError, match="futura"):
         SQLiteStore(path)
