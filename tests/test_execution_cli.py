@@ -7,7 +7,7 @@ import time
 
 from agentflow.agents import AgentResult, ProcessIdentity, ProcessResult, ProcessSpec
 from agentflow.agents import ExecutionPolicy, ExecutionRequest
-from agentflow.agents import codex
+from agentflow import cli as cli_module
 from agentflow.cli import main
 from agentflow.planning import load_plan
 from agentflow.state.execution import ExecutionStore
@@ -72,7 +72,7 @@ def project(tmp_path):
 def test_execute_cli_is_explicit_and_idempotent(tmp_path, monkeypatch, capsys):
     root = project(tmp_path)
     FakeRuntime.runs = 0
-    monkeypatch.setattr(codex, "CodexAdapter", FakeAdapter)
+    monkeypatch.setattr(cli_module, "CodexAdapter", FakeAdapter)
     monkeypatch.setattr("agentflow.cli.LocalRuntime", FakeRuntime)
     command = ["execute", "--path", str(root), "--task", "first", "--operation-id", "run-1",
                "--sandbox", "workspace-write", "--approval", "never"]
@@ -87,7 +87,7 @@ def test_execute_cli_is_explicit_and_idempotent(tmp_path, monkeypatch, capsys):
 def test_cancel_cli_signals_active_attempt(tmp_path, monkeypatch, capsys):
     root = project(tmp_path)
     WaitingRuntime.started.clear()
-    monkeypatch.setattr(codex, "CodexAdapter", FakeAdapter)
+    monkeypatch.setattr(cli_module, "CodexAdapter", FakeAdapter)
     monkeypatch.setattr("agentflow.cli.LocalRuntime", WaitingRuntime)
     base = ["--path", str(root)]
     runner = Thread(target=main, args=( ["execute", *base, "--task", "first", "--operation-id", "run-cancel",
