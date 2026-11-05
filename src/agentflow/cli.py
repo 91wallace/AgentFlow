@@ -17,7 +17,7 @@ from .state.inspection import inspect_state
 from .state.execution import ExecutionStore
 from .agents import ExecutionError, ExecutionPolicy, ExecutionRequest, ProcessResult
 from .agents.codex import CodexAdapter
-from .runtime.local import LocalRuntime
+from .runtime.local import LocalRuntime, SpawnFailure
 from .runtime.local import LocalRuntime as _ProcessController
 from .planning import digest
 
@@ -128,10 +128,14 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     result = runtime.run(spec, attempt.attempt_id, request.policy,
                                          lambda identity: store.started(attempt.attempt_id, identity), _NeverCancel())
-                except OSError as exc:
+                except SpawnFailure as exc:
                     run_directory = root / ".agentflow" / "runs" / attempt.attempt_id
                     result = ProcessResult("process_failed", None, run_directory / "stdout.log", run_directory / "stderr.log", hashlib.sha256(b"").hexdigest(),
                                            hashlib.sha256(b"").hexdigest(), 0, 0, f"spawn_failed:{type(exc).__name__}")
+                except Exception as exc:
+                    run_directory = root / ".agentflow" / "runs" / attempt.attempt_id
+                    result = ProcessResult("interrupted", None, run_directory / "stdout.log", run_directory / "stderr.log", hashlib.sha256(b"").hexdigest(),
+                                           hashlib.sha256(b"").hexdigest(), 0, 0, f"runtime_interrupted:{type(exc).__name__}")
                 store.finish(attempt.attempt_id, result)
                 if result.status == "process_succeeded":
                     try:

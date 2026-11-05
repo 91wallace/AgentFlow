@@ -56,6 +56,12 @@ class WaitingRuntime(FakeRuntime):
         return ProcessResult(status, None, output, directory / "stderr.log", "0" * 64, "0" * 64, 0, 0, status)
 
 
+class UncertainRuntime(FakeRuntime):
+    def run(self, spec, attempt_id, policy, on_started, cancel):
+        on_started(ProcessIdentity(123, "marker", "123", 1, attempt_id, "token"))
+        raise OSError("simulated post-spawn interruption")
+
+
 def project(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -115,3 +121,15 @@ def test_recover_cli_reports_ambiguous_prepared_attempt(tmp_path, capsys):
     assert attempt.attempt_id in capsys.readouterr().out
     with ExecutionStore(control / "state.sqlite3") as store:
         assert store.attempt(attempt.attempt_id).status == "interrupted"
+
+
+def test_post_spawn_os_error_is_recorded_as_unknown(tmp_path, monkeypatch, capsys):
+    root = project(tmp_path)
+    monkeypatch.setattr(cli_module, "CodexAdapter", FakeAdapter)
+    monkeypatch.setattr(cli_module, "LocalRuntime", UncertainRuntime)
+    assert main(["execute", "--path", str(root), "--task", "first", "--operation-id", "uncertain",
+                 "--sandbox", "workspace-write", "--approval", "never"]) == 1
+    with ExecutionStore(root / ".agentflow" / "state.sqlite3") as store:
+        attempt_id = store.db.execute("SELECT attempt_id FROM execution_attempts").fetchone()[0]
+        assert store.attempt(attempt_id).status == "interrupted"
+    assert "interrupted" in capsys.readouterr().out

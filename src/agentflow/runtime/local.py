@@ -19,6 +19,10 @@ _KEY_VALUE = re.compile(r'(?i)((?:api[_-]?key|token|password|authorization)["\']
 _TOKEN = re.compile(r'sk-[A-Za-z0-9_-]{10,}')
 
 
+class SpawnFailure(OSError):
+    """The operating system confirmed that no child process was created."""
+
+
 def redact(data: bytes) -> bytes:
     value = data.decode("utf-8", errors="replace")
     value = _KEY_VALUE.sub(lambda match: match.group(1) + "[REDACTED]", value)
@@ -179,16 +183,25 @@ class LocalRuntime:
     def run(self, spec: ProcessSpec, attempt_id: str, policy: ExecutionPolicy,
             on_started: StartedCallback, cancel: Cancellation) -> ProcessResult:
         if not spec.cwd.is_dir() or not spec.executable.is_file():
-            raise FileNotFoundError("executável ou diretório de trabalho inexistente")
+            raise SpawnFailure("executável ou diretório de trabalho inexistente")
         if not attempt_id.isascii() or not attempt_id.replace("-", "").isalnum():
             raise ValueError("attempt_id inválido para caminho de log")
         directory = self.log_directory / attempt_id
-        directory.mkdir(parents=True, exist_ok=False)
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            raise SpawnFailure("não foi possível preparar diretório de logs") from exc
         if os.name != "nt":
             os.chmod(directory, 0o700)
         stdout_path = directory / "stdout.log"
         stderr_path = directory / "stderr.log"
-        handles = [open(stdout_path, "xb"), open(stderr_path, "xb")]
+        handles = []
+        try:
+            handles = [open(stdout_path, "xb"), open(stderr_path, "xb")]
+        except OSError as exc:
+            for handle in handles:
+                handle.close()
+            raise SpawnFailure("não foi possível abrir logs antes do spawn") from exc
         if os.name != "nt":
             for path in (stdout_path, stderr_path):
                 os.chmod(path, 0o600)
@@ -242,10 +255,13 @@ class LocalRuntime:
             inherited = ("PATH", "HOME", "USERPROFILE", "CODEX_HOME", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA")
             env = {key: os.environ[key] for key in inherited if key in os.environ}
             env.update(dict(spec.environment))
-            process = subprocess.Popen([str(spec.executable), *spec.arguments], cwd=spec.cwd,
-                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       env=env, start_new_session=(os.name != "nt"),
-                                       creationflags=((subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004) if os.name == "nt" else 0))
+            try:
+                process = subprocess.Popen([str(spec.executable), *spec.arguments], cwd=spec.cwd,
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           env=env, start_new_session=(os.name != "nt"),
+                                           creationflags=((subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004) if os.name == "nt" else 0))
+            except OSError as exc:
+                raise SpawnFailure("sistema operacional não criou subprocesso") from exc
             if os.name == "nt":
                 from .windows_job import WindowsJob
                 job = WindowsJob(process)

@@ -5,7 +5,7 @@ from threading import Event, Timer
 import pytest
 
 from agentflow.agents import ExecutionPolicy, ProcessSpec
-from agentflow.runtime.local import LocalRuntime
+from agentflow.runtime.local import LocalRuntime, SpawnFailure
 import agentflow.runtime.local as local_module
 
 
@@ -48,10 +48,11 @@ def test_spawn_failure_does_not_call_started(tmp_path, monkeypatch):
     def fail_spawn(*args, **kwargs):
         raise OSError("simulated spawn failure")
     monkeypatch.setattr(local_module.subprocess, "Popen", fail_spawn)
-    with pytest.raises(OSError, match="simulated"):
+    with pytest.raises(SpawnFailure) as error:
         LocalRuntime(tmp_path / "logs").run(ProcessSpec(
             executable, (), tmp_path, "", (), "fake", "1", "inherited", "inherited"),
             "failed", ExecutionPolicy(), called.append, Event())
+    assert isinstance(error.value.__cause__, OSError)
     assert not called
 
 
