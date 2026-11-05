@@ -105,7 +105,7 @@ Riscos residuais: identidade confiável do proprietário de reserva e autoria de
 
 ## Fase 3 — implementação local
 
-Escopo autorizado: executor local Codex CLI para uma tarefa solicitada explicitamente, runtime de processos, validação independente, limites, logs, cancelamento e recuperação conservadora. Os [contratos detalhados](architecture.md#fase-3--executor-codex-cli-local) estão implementados localmente; a branch ainda aguarda revisão, publicação e CI. A Fase 2 foi integrada à `main` pelo PR #2 (merge `c82ece560f2d1bf618d2f80e29c15a40ea19444b`). Nenhum agente real foi executado.
+Escopo autorizado: executor local Codex CLI para uma tarefa solicitada explicitamente, runtime de processos, validação independente, limites, logs, cancelamento e recuperação conservadora. Os [contratos detalhados](architecture.md#fase-3--executor-codex-cli-local) foram implementados e integrados à `main` pelo PR #3 (merge `edb7c4f7f0e672d8d1432d2d8948c3b49b7f4b91`); CI Python 3.11, 3.12 e 3.13 aprovada. Nenhum agente real foi executado.
 
 | ID | Tarefa planejada | Dependências | Critério de aceite verificável |
 | --- | --- | --- | --- |
@@ -131,8 +131,52 @@ Escopo autorizado: executor local Codex CLI para uma tarefa solicitada explicita
 
 ### Gate e limites
 
-Gate de homologação: uma única tarefa explícita pode ser executada pelo adaptador local Codex dentro da política aprovada, com estado e logs auditáveis, limites aplicados, cancelamento e recuperação determinística; conclusão depende de validação independente; testes de contrato e CI passam em Python 3.11, 3.12 e 3.13. O código local não foi publicado e não houve merge ou execução real de agente.
+Gate de homologação: uma única tarefa explícita pode ser executada pelo adaptador local Codex dentro da política aprovada, com estado e logs auditáveis, limites aplicados, cancelamento e recuperação determinística; conclusão depende de validação independente; testes de contrato e CI passam em Python 3.11, 3.12 e 3.13. A Fase 3 foi publicada e integrada após a homologação; nenhum agente real foi executado.
 
 Decisões consolidadas: timeout padrão 1800 s (máximo configurável 7200 s), três tentativas totais, sem repetição automática, logs incrementais limitados e retenção de 30 dias, identidade de processo além de PID, cancelamento de árvore por plataforma, sandbox e aprovações somente conforme configuração explícita/efetiva do usuário. Docker não é o sandbox do Codex.
 
 Riscos residuais: Codex CLI/flags e introspecção de configuração podem evoluir; limites rígidos de CPU/memória variam por sistema; matar processo não reverte arquivos; SQLite e spawn não são atômicos; logs podem conter segredos emitidos pelo agente; no Linux, processos podem sobreviver à morte do pai. A implementação deve falhar de modo seguro quando uma capacidade exigida não puder ser verificada. Git branches/checkpoints, Docker, múltiplos adaptadores e execução autônoma de fila permanecem fora da Fase 3.
+
+## Fase 4 — plano detalhado: recuperação e Git
+
+Estado: fechamento arquitetural consolidado, aguardando revisão antes de código. A Fase 3 foi integrada pelo PR #3 (merge `edb7c4f7f0e672d8d1432d2d8948c3b49b7f4b91`). Ver [arquitetura da Fase 4](architecture.md#fase-4--recuperação-e-integração-explícita-com-git-fechamento-arquitetural) e [ADR 0004](decisions/0004-phase-4-recovery-git.md). Não executar agentes reais nem autonomamente; sem operações remotas, push, pull/fetch, merge/rebase, deploy ou submódulos.
+
+### Ordem definitiva e critérios de aceite F4-01 a F4-10
+
+| ID | Tarefa | Dependências | Critério verificável |
+| --- | --- | --- | --- |
+| F4-01 | Fixar identidade (UUIDv4 `ws-<32hex>`, branch `agentflow/ws/<hex>`, path/lock persistentes), digests SHA-256 canônicos, limites 128 paths/64 MiB/30 s, locks flock Linux e msvcrt Windows sem expiração, owner identity e recuperação como `unknown`, retenção indefinida/limpeza explícita, trailer/OID/tree/pathset de checkpoint e política de hooks/filtros. | Fase 3, ADR 0004 | Valores documentados em ADR/arquitetura; testes de parse/cálculo dos limites e owner records; nenhuma configuração executável não auditada aceita. F4-01 validada antes de interfaces/código. |
+| F4-02 | Definir modelos imutáveis e protocolos `WorkspaceProvider`/`GitProvider`, erros e doubles de contrato; evoluir `tasks.toml` para schema v2 com `versioned_paths` por tarefa. | F4-01 | `core` depende só de protocolos; contratos carregam identidade, revisão, base, branch, pathset e operation ID; não há método remoto/destrutivo nem import concreto no núcleo. |
+| F4-03 | Implementar migração SQLite v2→v3: workspaces, operações, checkpoints Git e eventos. | F4-02 | Backup consistente antes da migração; FKs/índices/constraints; falha injetada reverte tudo e mantém v2; preservar registros F2/F3 e recusar versão futura sem alteração. |
+| F4-04 | Implementar reserva/lock interprocesso por workspace e preflight read-only de repo/dirty state/identidade. | F4-03 | Dois processos não mutam simultaneamente; PID reutilizado não adota lock; raiz comum, cwd, branch e HEAD conferidos; alterações preexistentes preservadas byte a byte e conflito não muta Git. |
+| F4-05 | Criar explicitamente worktree obrigatório e branch própria para tarefa que pode alterar arquivos versionados; registrar identidade/lifecycle. | F4-02, F4-04 | Worktree começa na base persistida e limpo; checkout original permanece intacto; repetição idêntica reutiliza identidade; colisão/divergência falha; nenhuma remoção automática em estado sujo/ambíguo. |
+| F4-06 | Capturar alterações e derivar/persistir allowlist de paths da autorização/revisão; validação robusta de path e submódulo. | F4-05 | Espaços/Unicode/caracteres especiais são round-tripped sem shell; traversal, symlink escape, case collision não representável, arquivo operacional e submódulo são recusados; escopo não é ampliado pelo agente. |
+| F4-07 | Implementar checkpoint explícito com index privado, pathset allowlisted e verificação independente. | F4-03, F4-06 | Revalidar cada path imediatamente antes de staging e commit; nunca `add -A`/`.`; staging exato; verificar OID, parent, tree, branch/ref e paths; idempotência não duplica commit. |
+| F4-08 | Implementar estados intermediários e reconciliação crash-safe entre SQLite/Git. | F4-03 a F4-07 | Injeção de crash em toda fronteira; `unknown` bloqueia repetição e mutações; recuperação compara fatos e é idempotente; resultado não único exige decisão explícita; nenhuma alteração removida/revertida. |
+| F4-09 | Integrar fluxo da tarefa e CLI explícita/read-only onde aplicável, sem colapsar execução, validação e conclusão. | F4-05 a F4-08 | Tarefa modificadora só conclui com execução resolvida, validação e evidências verificadas da revisão e checkpoint verificado; sem alterações, exige verificação explícita de workspace limpo e HEAD registrado. Operação local confinada; CLI não oferece ações remotas/destrutivas. Implementado: `workspaces`, `git-recover`, `checkpoint`, `verify-no-changes` e `complete`. |
+| F4-10 | Testes de regressão, compatibilidade Linux/Windows, docs, pacote e homologação completa. | F4-01 a F4-09 | Suíte completa, reabertura, concorrência/idempotência, migração, package smoke e CI Python 3.11/3.12/3.13 aprovados; nenhum agente real; revisão de staging/arquivos exclui dados operacionais e ADR legado. Suíte local passou; pacote instalado, Linux e CI remota permanecem pendentes pelas limitações anotadas no progresso. |
+
+### Dependências
+
+- F4-01 é gate obrigatório antes de contratos/esquema; F4-02 precede persistência e implementação de adaptadores.
+- F4-03 precede reserva durável; F4-04 habilita qualquer mutação Git; F4-05 só cria workspace após lock/preflight.
+- F4-06 depende de workspace isolado; F4-07 só consome allowlist validada; F4-08 integra e testa todas as fronteiras externas antes da CLI.
+- F4-09 só expõe operações depois de recovery confiável; conclusão consome resultados de F3, evidências F2/F3 e checkpoint F4 em transação coerente.
+- F4-10 é gate de homologação e não pode ser declarado aprovado antes dos três jobs da CI.
+
+### Matriz de testes e aceite
+
+1. **Persistência:** migração v2→v3, backup em WAL, FKs, rollback, versão futura, IDs únicos, checkpoint/task/revision coerentes e preservação de estado histórico.
+2. **Workspace e preexistência:** repo temporário sem remote; worktree/branch persistente; original dirty; arquivos staged, unstaged e untracked; alteração externa de HEAD/ref; workspace sujo; nenhum dado movido, limpo ou descartado.
+3. **Paths:** espaços, Unicode, caracteres de pathspec, newline/leading dash quando suportados; NUL-safe; symlink/traversal/UNC/drive/case collision; allowlist muda somente via revisão explícita; alterações entre duas validações impedem commit.
+4. **Segurança Git:** spy garante sem shell, sem comando remoto/destrutivo, sem aliases/config mutável; submódulo recusado; somente index privado e lista exata; credenciais, `.agentflow/`, logs, DB/WAL, cache e ADR legado fora do checkpoint.
+5. **Concorrência/idempotência:** processos simultâneos no mesmo workspace, lock ativo/órfão/PID reciclado, operação idempotente, parâmetros divergentes conflitantes, reserva refs comuns.
+6. **Falhas/recuperação:** falha/crash em intenção→comando, durante comando, commit→leitura, leitura→SQLite; operação `unknown` não repete; recuperação repetida sem eventos duplicados; ausência de commit duplicado, reset ou exclusão.
+7. **Fluxo:** processo falho/sucesso/desconhecido; validação falha; evidência apenas declarada; checkpoint ausente/tampered; conclusão negada até processo resolvido + validação/evidências verificadas + checkpoint, quando houver alterações versionadas.
+8. **Plataforma/regressão:** Windows/Linux, Python 3.11/3.12/3.13, F1–F3, pacote instalado; Codex/Docker ausentes e nenhum agente real; protótipo e dados locais preservados.
+
+### Riscos residuais e gate
+
+Worktree isola arquivos de trabalho, mas compartilha repositório Git comum e não é sandbox contra processo com as permissões do usuário; race com processo externo, hooks/filters e particularidades de case/Unicode podem impedir garantia absoluta. Recuperação de commit efetuado sem confirmação SQLite pode requerer resolução humana. Locks dependem de identidade confiável por sistema operacional. Esses riscos exigem detecção e falha segura, sem prometer atomicidade distribuída.
+
+Estado: **F4-01 a F4-09 implementadas localmente; F4-10 em homologação local**. A CI remota nas versões Python 3.11, 3.12 e 3.13 depende da publicação autorizada da branch. Não foram feitos commit, push ou merge nesta etapa.

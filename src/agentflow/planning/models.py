@@ -24,6 +24,7 @@ class Task:
     description: str
     acceptance_criteria: tuple[Criterion, ...]
     depends_on: tuple[str, ...] = ()
+    versioned_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

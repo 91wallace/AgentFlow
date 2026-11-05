@@ -42,6 +42,7 @@ class ExecutionRequest:
     instruction: str
     policy: ExecutionPolicy
     acceptance_criteria: tuple[tuple[str, str], ...] = ()
+    workspace_id: str = ""
 
 
 @dataclass(frozen=True)
