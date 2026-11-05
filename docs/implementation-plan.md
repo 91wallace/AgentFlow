@@ -51,7 +51,7 @@ Instalação reproduzível com Python 3.11+; `agentflow --version`, `init` e `do
 | F1-05 | Validada localmente | Pytest confirmou obrigatoriedade por perfil e ausência de dependências opcionais. |
 | F1-06 | Validada localmente | Teste com CLI instalada confirmou códigos 0, 1 e 2; ausência de Codex e Docker no PATH foi simulada. |
 | F1-07 | Validada localmente | `python -m pytest -q`: 17 aprovados, 0 falhos. |
-| F1-08 | Implementada, CI remota pendente | Workflow Ubuntu/Python 3.11, 3.12 e 3.13 ainda não executado no GitHub. |
+| F1-08 | Validada na CI remota | Workflow Ubuntu/Python 3.11, 3.12 e 3.13 passou no GitHub Actions para push e Pull Request #1. |
 | F1-09 | Validada localmente | README e guia revisados contra comandos instalados e saídas observadas. |
 
 ## Homologação local — 2026-11-04
@@ -61,6 +61,6 @@ Instalação reproduzível com Python 3.11+; `agentflow --version`, `init` e `do
 - Empacotamento: wheel construído pela instalação PEP 517; metadados e entry point `agentflow` confirmados; `pip check` sem requisitos quebrados.
 - Integração: em repositório Git temporário, `init` criou `config.toml`; segunda chamada preservou bytes; configuração inválida foi preservada com saída 2. `doctor` retornou 0 com Codex/Docker opcionais ausentes, 1 com Codex obrigatório ausente e 2 com TOML inválido. O repositório temporário foi descartado após o teste.
 - `git diff --check` passou. O aviso de normalização LF/CRLF do README não é falha de whitespace.
-- Limite: a CI do GitHub ainda não rodou. A aprovação definitiva da Fase 1 depende de sucesso da matriz remota.
+- CI do GitHub: os jobs Python 3.11, 3.12 e 3.13 passaram nas execuções de push e Pull Request #1. A Fase 1 está pronta para revisão e merge, sem merge automático.
 
 Revalidação antes da publicação: a suíte passou novamente com `--basetemp .pytest-run` (17 aprovados). Dois testes foram corrigidos para usar um caminho inexistente explícito; assim não dependem da localização do diretório temporário em relação a um repositório Git pai.
