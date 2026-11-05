@@ -29,3 +29,33 @@ agent = "none"
 Para desenvolvimento: `python -m pip install '.[test]'` e `python -m pytest -q`. A CI executa essas verificações em Ubuntu com Python 3.11, 3.12 e 3.13.
 
 O protótipo legado `autonomous-development-runner/` não é instalado pelo pacote da raiz e permanece apenas como referência.
+
+## Fase 2: plano e estado
+
+Os únicos arquivos de `.agentflow/` destinados ao Git são `spec.toml` e `tasks.toml`. `config.toml`, `state.sqlite3`, WAL/SHM e backups são dados locais ignorados. O formato v1 exige IDs estáveis em letras minúsculas, dígitos e hífen e critérios com `id` e `description`.
+
+```toml
+# .agentflow/spec.toml
+schema_version = 1
+project_id = "example"
+title = "Example"
+objective = "Deliver a verifiable result"
+[[acceptance_criteria]]
+id = "reviewed"
+description = "Requirements reviewed"
+```
+
+```toml
+# .agentflow/tasks.toml
+schema_version = 1
+[[tasks]]
+id = "first"
+title = "First task"
+description = "Prepare the first deliverable"
+depends_on = []
+[[tasks.acceptance_criteria]]
+id = "done"
+description = "Deliverable reviewed"
+```
+
+`agentflow plan --path caminho` valida os dois TOML e imprime a ordem de tarefas; não grava estado. `agentflow state --path caminho` lê o banco existente sem modificá-lo e informa as tarefas, ou retorna erro se o plano mudou ou o banco não existe. Ambos usam código 0 para sucesso e 2 para entrada/estado inválido. Não há comandos de execução, reserva ou verificação automática na CLI desta fase. APIs internas de estado são destinadas a testes de contrato e integração futura.
