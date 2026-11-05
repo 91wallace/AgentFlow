@@ -19,7 +19,7 @@ def inspect_state(path: Path, plan: Plan) -> tuple[TaskState, ...]:
         with closing(sqlite3.connect(uri, uri=True)) as db:
             db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN")
-            if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2):
                 raise IntegrityError("versão SQLite incompatível")
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise IntegrityError("banco corrompido")

@@ -65,9 +65,9 @@ Instalação reproduzível com Python 3.11+; `agentflow --version`, `init` e `do
 
 Revalidação antes da publicação: a suíte passou novamente com `--basetemp .pytest-run` (17 aprovados). Dois testes foram corrigidos para usar um caminho inexistente explícito; assim não dependem da localização do diretório temporário em relação a um repositório Git pai.
 
-## Fase 2 — plano técnico proposto para revisão
+## Fase 2 — plano executado
 
-A Fase 1 foi integrada à `main` no PR #1. A implementação local da Fase 2 foi autorizada, sem push ou merge. Esta seção delimita especificações, tarefas, dependências e estado operacional. Os contratos detalhados, o esquema de tabelas, as transições e a recuperação estão em [architecture.md](architecture.md#fase-2--planejamento-e-estado). O progresso verificável está em [phase-2-progress.md](phase-2-progress.md).
+A Fase 1 foi integrada à `main` no PR #1 e a Fase 2 no PR #2. Esta seção registra as tarefas executadas para especificações, dependências e estado operacional. Os contratos detalhados, o esquema de tabelas, as transições e a recuperação estão em [architecture.md](architecture.md#fase-2--planejamento-e-estado). O progresso verificável está em [phase-2-progress.md](phase-2-progress.md).
 
 ### Ordem de implementação e critérios de aceite
 
@@ -97,8 +97,42 @@ A Fase 1 foi integrada à `main` no PR #1. A implementação local da Fase 2 foi
 
 ### Gate e riscos
 
-Gate da Fase 2: contratos v1 documentados e testados; DAG válido; SQLite transacional com migrações reversíveis por falha, FKs e auditoria; recuperação determinística e idempotente; CI verde nas três versões; nenhuma execução de agentes. A Fase 3 só começa após revisão e autorização separadas.
+Gate da Fase 2, aprovado no PR #2: contratos v1 documentados e testados; DAG válido; SQLite transacional com migrações reversíveis por falha, FKs e auditoria; recuperação determinística e idempotente; CI verde nas três versões; nenhuma execução de agentes. A implementação da Fase 3 depende de revisão e autorização separadas.
 
 Decisões consolidadas: somente `spec.toml` e `tasks.toml` versionáveis; revisões iniciadas imutáveis com revalidação explícita; evidência estruturada declarada/verificada por critério; reserva órfã bloqueada para reconciliação; SQLite em WAL com FKs, timeout, `synchronous=FULL`, migrações transacionais e backup consistente; `operation_id` global com digest de solicitação. F2-01 registra parâmetros concretos em ADR antes do código.
 
 Riscos residuais: identidade confiável do proprietário de reserva e autoria de verificação; custo de I/O de durabilidade e backup; conflito quando TOML muda entre leitura e commit; restauração manual após corrupção física; compatibilidade de futuros esquemas TOML/SQLite. Migração do JSON do ADR, checkpoints Git, isolamento Docker e validação automática ficam fora da Fase 2.
+
+## Fase 3 — implementação local
+
+Escopo autorizado: executor local Codex CLI para uma tarefa solicitada explicitamente, runtime de processos, validação independente, limites, logs, cancelamento e recuperação conservadora. Os [contratos detalhados](architecture.md#fase-3--executor-codex-cli-local) estão implementados localmente; a branch ainda aguarda revisão, publicação e CI. A Fase 2 foi integrada à `main` pelo PR #2 (merge `c82ece560f2d1bf618d2f80e29c15a40ea19444b`). Nenhum agente real foi executado.
+
+| ID | Tarefa planejada | Dependências | Critério de aceite verificável |
+| --- | --- | --- | --- |
+| F3-01 | Revisar e aprovar ADR 0003; validar valores, capacidades concretas do Codex, cancelamento por plataforma e configuração efetiva. | Fase 2 | ADR aprovado com tabela de versão/capacidade testada e erros de pré-checagem; nenhum sandbox ou aprovação é ativado automaticamente. |
+| F3-02 | Definir `ExecutionRequest`, `ExecutionResult`, `AgentAdapter`, `ProcessRuntime`, políticas efetivas e erros de domínio. | F3-01 | Núcleo importa apenas protocolos; adaptadores simulados substituem Codex; pedido inclui revisão, ID idempotente e configuração efetiva, inclusive `danger-full-access` quando escolhida. |
+| F3-03 | Implementar migração SQLite v2 de tentativas/eventos, índice de uma tentativa ativa e backup consistente. | F3-02 | Reabertura v1→v2 preserva tarefas/evidências; falha de backup/migração mantém v1; tentativas referenciam revisão correta; versão futura é recusada. |
+| F3-04 | Implementar pré-checagem, reserva e tentativa `prepared` atômicas, com teto de três tentativas. | F3-03 | Disputa entre processos cria uma tentativa ativa; pedido idêntico retorna a mesma; divergente falha; pré-checagem falha sem spawn; `prepared` consome uma tentativa. |
+| F3-05 | Implementar runtime local independente do Codex, com identidade verificável, limites, logs incrementais e cancelamento de árvore Windows/Linux. | F3-02, F3-04 | Processos falsos cobrem timeout de 1800 s configurável, limite de log, SIGTERM/SIGKILL no Linux e Job Object no Windows; PID reutilizado não é aceito como identidade. |
+| F3-06 | Implementar adaptador Codex CLI com detecção de versão/capacidades e configuração efetiva, sem sobrescrever configuração do usuário. | F3-01, F3-05 | Flags são usadas somente após verificação; modos explícitos de sandbox, inclusive acesso completo, e aprovações não interativas são preservados; formato inesperado falha; testes usam executável falso. |
+| F3-07 | Persistir logs, eventos, resultado do processo e ligação à revisão; limitar retenção e crescimento. | F3-03, F3-05, F3-06 | Logs até 10 MiB por fluxo por padrão, truncamento/falha controlados, retenção padrão de 30 dias com limpeza explícita, payload SQLite até 4 KiB; evento/checkpoint atômicos e metadados sem segredos. |
+| F3-08 | Integrar validação e evidências verificadas; distinguir falha do processo, da validação e resultado desconhecido. | F3-07 | Saída `process_succeeded` não conclui tarefa; somente critérios verificados da revisão vigente justificam `completed`; saída parcial e falhas deixam estado auditável. |
+| F3-09 | Implementar recuperação e reconciliação de `prepared`/`running`, sem repetir efeitos externos. | F3-07, F3-08 | Queda antes/depois de spawn/identidade/commit bloqueia tentativa ambígua uma vez; processo possivelmente vivo impede nova execução; reabertura repetida não duplica eventos; decisão humana precede retentativa. |
+| F3-10 | Expor execução/cancelamento explícitos na CLI, documentação, testes de contrato e CI. | F3-04 a F3-09 | CLI não cria fila autônoma nem altera Git; testes Windows/Linux simulados e CI Python 3.11/3.12/3.13 passam sem Codex/Docker real; `init`, `doctor`, `plan`, `state` preservados. |
+
+### Matriz de testes proposta
+
+- **Contratos/adaptador:** versões e flags reais/incompatíveis, configuração herdada versus explícita, `danger-full-access`, aprovação não interativa, ausência de sandbox automático, argumentos/stdin seguros e saída estruturada válida/inválida; Codex falso por padrão.
+- **Persistência e concorrência:** migração v1→v2, backup, FKs, rollback, índice de tentativa ativa, três tentativas totais, idempotência por `operation_id`, parâmetros divergentes e disputa entre processos.
+- **Runtime e logs:** timeout padrão 1800 s/configuração, inatividade opcional, limite de 10 MiB por fluxo, drenagem, truncamento, retenção/limpeza explícita, falha de escrita, SIGTERM/SIGKILL Linux e Job Object Windows, pai encerrado e filhos órfãos.
+- **Recuperação/repetição:** interrupção em cada fronteira SQLite/spawn, PID reutilizado, tentativa `prepared`/`running`, processo possivelmente ativo, duas reaberturas, resultado desconhecido sem nova execução e decisão humana auditada antes de retentar.
+- **Validação:** falha do processo versus falha de validação versus desconhecido, declaração versus verificação, critérios da revisão correta, agente insuficiente para conclusão e preservação de alterações parciais.
+- **Regressão:** fases 1 e 2, configuração Codex existente intocada, `.agentflow/` operacional e protótipo ADR fora do pacote/Git.
+
+### Gate e limites
+
+Gate de homologação: uma única tarefa explícita pode ser executada pelo adaptador local Codex dentro da política aprovada, com estado e logs auditáveis, limites aplicados, cancelamento e recuperação determinística; conclusão depende de validação independente; testes de contrato e CI passam em Python 3.11, 3.12 e 3.13. O código local não foi publicado e não houve merge ou execução real de agente.
+
+Decisões consolidadas: timeout padrão 1800 s (máximo configurável 7200 s), três tentativas totais, sem repetição automática, logs incrementais limitados e retenção de 30 dias, identidade de processo além de PID, cancelamento de árvore por plataforma, sandbox e aprovações somente conforme configuração explícita/efetiva do usuário. Docker não é o sandbox do Codex.
+
+Riscos residuais: Codex CLI/flags e introspecção de configuração podem evoluir; limites rígidos de CPU/memória variam por sistema; matar processo não reverte arquivos; SQLite e spawn não são atômicos; logs podem conter segredos emitidos pelo agente; no Linux, processos podem sobreviver à morte do pai. A implementação deve falhar de modo seguro quando uma capacidade exigida não puder ser verificada. Git branches/checkpoints, Docker, múltiplos adaptadores e execução autônoma de fila permanecem fora da Fase 3.

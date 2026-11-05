@@ -36,17 +36,25 @@ SCHEMA = (
     "CREATE INDEX events_by_task ON task_events(project_id,task_id,event_id)",
 )
 
+EXECUTION_SCHEMA = (
+    "CREATE TABLE execution_attempts(attempt_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, definition_revision INTEGER NOT NULL, operation_id TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('prepared','running','process_succeeded','process_failed','timed_out','cancelled','interrupted')), validation_status TEXT NOT NULL DEFAULT 'pending' CHECK(validation_status IN ('pending','validation_passed','validation_failed')), owner TEXT NOT NULL, prepared_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, adapter_name TEXT NOT NULL, adapter_version TEXT NOT NULL, capabilities TEXT NOT NULL, effective_sandbox TEXT NOT NULL, effective_approval TEXT NOT NULL, pid INTEGER, process_started_at TEXT, group_id TEXT, parent_pid INTEGER, parent_started_at TEXT, process_token TEXT, exit_code INTEGER, reason TEXT NOT NULL DEFAULT '', stdout_path TEXT NOT NULL DEFAULT '', stderr_path TEXT NOT NULL DEFAULT '', stdout_digest TEXT NOT NULL DEFAULT '', stderr_digest TEXT NOT NULL DEFAULT '', stdout_bytes INTEGER NOT NULL DEFAULT 0, stderr_bytes INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(project_id,task_id,definition_revision) REFERENCES task_definitions(project_id,task_id,definition_revision), FOREIGN KEY(project_id,task_id) REFERENCES tasks(project_id,task_id))",
+    "CREATE UNIQUE INDEX one_active_execution ON execution_attempts(project_id,task_id) WHERE status IN ('prepared','running')",
+    "CREATE TABLE execution_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(payload)<=4096), occurred_at TEXT NOT NULL, FOREIGN KEY(attempt_id) REFERENCES execution_attempts(attempt_id))",
+    "CREATE INDEX execution_events_by_attempt ON execution_events(attempt_id,event_id)",
+)
+
 
 class SQLiteStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, execution: bool = False):
         self.path = path
+        self.execution = execution
         self.existed = path.exists()
         if not path.parent.is_dir():
             raise IntegrityError(f"diretório inexistente: {path.parent}")
         try:
             self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise IntegrityError(f"versão SQLite futura: {version}")
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.execute("PRAGMA foreign_keys=ON")
@@ -103,12 +111,22 @@ class SQLiteStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        if version > 2:
             raise IntegrityError(f"versão SQLite futura: {version}")
-        if version == 1:
+        if version in (1, 2):
             recorded = self.db.execute("SELECT version FROM schema_migrations").fetchall()
-            if recorded != [(1,)]:
+            if recorded != [(number,) for number in range(1, version + 1)]:
                 raise IntegrityError("histórico de migração divergente")
+            if version == 1 and self.execution:
+                self._backup()
+                try:
+                    with self.transaction() as db:
+                        for statement in EXECUTION_SCHEMA:
+                            db.execute(statement)
+                        db.execute("INSERT INTO schema_migrations VALUES(2,?)", (now(),))
+                        db.execute("PRAGMA user_version=2")
+                except (sqlite3.DatabaseError, ConflictError) as exc:
+                    raise IntegrityError(f"migração v2 falhou: {exc}") from exc
             return
         tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
         if tables:
@@ -123,6 +141,8 @@ class SQLiteStore:
                 db.execute("PRAGMA user_version=1")
         except ConflictError as exc:
             raise IntegrityError(f"migração falhou: {exc}") from exc
+        if self.execution:
+            self._migrate()
 
     def check_integrity(self) -> None:
         if self.db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
