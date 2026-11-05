@@ -325,7 +325,10 @@ class LocalRuntime:
                 status = "process_failed"
             result = ProcessResult(status, process.returncode, stdout_path, stderr_path,
                                    digests[0].hexdigest(), digests[1].hexdigest(), counts[0], counts[1],
-                                   reason)
+                                   reason, (("adapter_id", spec.adapter_name),
+                                            ("adapter_api_version", spec.adapter_api_version),
+                                            ("provider_id", spec.provider_id),
+                                            ("model_id", spec.model_id)))
             metadata = {"attempt_id": attempt_id, "status": result.status, "exit_code": result.exit_code,
                         "reason": result.reason, "stdout_digest": result.stdout_digest,
                         "stderr_digest": result.stderr_digest, "stdout_bytes": result.stdout_bytes,
@@ -340,7 +343,7 @@ class LocalRuntime:
                 if result.status == "process_succeeded":
                     result = ProcessResult("process_failed", result.exit_code, result.stdout_path, result.stderr_path,
                                            result.stdout_digest, result.stderr_digest, result.stdout_bytes,
-                                           result.stderr_bytes, "log_write_failed")
+                                           result.stderr_bytes, "log_write_failed", result.request_metadata)
             return result
         finally:
             if process is not None and process.poll() is None:

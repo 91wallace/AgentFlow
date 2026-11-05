@@ -30,7 +30,8 @@ Instalação reproduzível com Python 3.11+; `agentflow --version`, `init` e `do
 | 3 — Execução local | Fase 2 | Adaptador Codex CLI, runtime local, políticas de tentativa e timeout, validação e evidências; execução de tarefa isolada por testes de contrato. |
 | 4 — Recuperação e Git | Fase 3 | Reconciliação após interrupção, prevenção de duplicidade, branches e checkpoints explícitos; testes de falha entre transições. |
 | 5 — Validação, Docker e entrega | Fase 4 | Validação independente e quality gates sobre checkpoints imutáveis; runtime Docker opcional, isolamento configurável, builds rastreáveis e plano de entrega sob política explícita; sem deploy automático. |
-| 6 — Ecossistema | Fase 5 | Adaptadores de outros agentes e eventual integração opcional com Vibe Coding Toolkit após revisão legal e técnica. |
+| 6 — Ecossistema de agents e contratos de modelo | Fase 5 | Contratos separados `AgentAdapter`, `ProviderDescriptor`, `ModelDescriptor`, `ModelSelection` e `ModelRoutingPolicy`; integrações na prioridade Antigravity → Claude Code → OpenCode → Hermes Agent; sem roteamento, retry ou troca automática nesta fase; sem código/conteúdo do Vibe Coding Toolkit. |
+| 7 — Orquestração inteligente de modelos | Fase 6 | Classificação de complexidade; catálogo versionado; seleção por capacidade/qualidade/custo/latência/risco; escalonamento baseado em evidência; budgets; validação independente; auditoria/métricas; comparação de qualidade; autorização explícita para mudar modelo/provider. |
 
 ## Questões e riscos a resolver antes de implementar
 
@@ -139,7 +140,7 @@ Riscos residuais: Codex CLI/flags e introspecção de configuração podem evolu
 
 ## Fase 4 — plano detalhado: recuperação e Git
 
-Estado: fechamento arquitetural consolidado, aguardando revisão antes de código. A Fase 3 foi integrada pelo PR #3 (merge `edb7c4f7f0e672d8d1432d2d8948c3b49b7f4b91`). Ver [arquitetura da Fase 4](architecture.md#fase-4--recuperação-e-integração-explícita-com-git-fechamento-arquitetural) e [ADR 0004](decisions/0004-phase-4-recovery-git.md). Não executar agentes reais nem autonomamente; sem operações remotas, push, pull/fetch, merge/rebase, deploy ou submódulos.
+Estado: **concluída e integrada** pelo PR #4. Head revisado `709e77ad46dfa3283922856fd078b6baca1b6029`, merge `8ec623813709d71b98fbd0be7e8fba87ebb9d565`, seis checks Python aprovados. Ver [progresso da Fase 4](phase-4-progress.md), [arquitetura](architecture.md#fase-4--recuperação-e-integração-explícita-com-git-fechamento-arquitetural) e [ADR 0004](decisions/0004-phase-4-recovery-git.md).
 
 ### Ordem definitiva e critérios de aceite F4-01 a F4-10
 
@@ -152,9 +153,9 @@ Estado: fechamento arquitetural consolidado, aguardando revisão antes de códig
 | F4-05 | Criar explicitamente worktree obrigatório e branch própria para tarefa que pode alterar arquivos versionados; registrar identidade/lifecycle. | F4-02, F4-04 | Worktree começa na base persistida e limpo; checkout original permanece intacto; repetição idêntica reutiliza identidade; colisão/divergência falha; nenhuma remoção automática em estado sujo/ambíguo. |
 | F4-06 | Capturar alterações e derivar/persistir allowlist de paths da autorização/revisão; validação robusta de path e submódulo. | F4-05 | Espaços/Unicode/caracteres especiais são round-tripped sem shell; traversal, symlink escape, case collision não representável, arquivo operacional e submódulo são recusados; escopo não é ampliado pelo agente. |
 | F4-07 | Implementar checkpoint explícito com index privado, pathset allowlisted e verificação independente. | F4-03, F4-06 | Revalidar cada path imediatamente antes de staging e commit; nunca `add -A`/`.`; staging exato; verificar OID, parent, tree, branch/ref e paths; idempotência não duplica commit. |
-| F4-08 | Implementar estados intermediários e reconciliação crash-safe entre SQLite/Git. | F4-03 a F4-07 | Injeção de crash em toda fronteira; `unknown` bloqueia repetição e mutações; recuperação compara fatos e é idempotente; resultado não único exige decisão explícita; nenhuma alteração removida/revertida. |
-| F4-09 | Integrar fluxo da tarefa e CLI explícita/read-only onde aplicável, sem colapsar execução, validação e conclusão. | F4-05 a F4-08 | Tarefa modificadora só conclui com execução resolvida, validação e evidências verificadas da revisão e checkpoint verificado; sem alterações, exige verificação explícita de workspace limpo e HEAD registrado. Operação local confinada; CLI não oferece ações remotas/destrutivas. Implementado: `workspaces`, `git-recover`, `checkpoint`, `verify-no-changes` e `complete`. |
-| F4-10 | Testes de regressão, compatibilidade Linux/Windows, docs, pacote e homologação completa. | F4-01 a F4-09 | Suíte completa, reabertura, concorrência/idempotência, migração, package smoke e CI Python 3.11/3.12/3.13 aprovados; nenhum agente real; revisão de staging/arquivos exclui dados operacionais e ADR legado. Suíte local passou; pacote instalado, Linux e CI remota permanecem pendentes pelas limitações anotadas no progresso. |
+| F4-08 | Implementar estados intermediários e reconciliação crash-safe entre SQLite/Git. | F4-03 a F4-07 | **Concluída:** injeção de crash nas fronteiras; `unknown` bloqueia repetição e mutações; recuperação idempotente baseada em fatos; resolução ambígua explícita. |
+| F4-09 | Integrar fluxo da tarefa e CLI explícita/read-only onde aplicável, sem colapsar execução, validação e conclusão. | F4-05 a F4-08 | **Concluída:** tarefa modificadora exige execução resolvida, validação, evidências da revisão e checkpoint verificado; sem alterações exige verificação explícita de workspace limpo/HEAD; CLI expõe somente operações locais autorizadas. |
+| F4-10 | Testes de regressão, compatibilidade Linux/Windows, docs, pacote e homologação completa. | F4-01 a F4-09 | **Concluída:** 121 testes locais, package smoke e seis checks Python 3.11/3.12/3.13 aprovados; PR #4 integrado pelo merge `8ec623813709d71b98fbd0be7e8fba87ebb9d565`. |
 
 ### Dependências
 
@@ -179,11 +180,11 @@ Estado: fechamento arquitetural consolidado, aguardando revisão antes de códig
 
 Worktree isola arquivos de trabalho, mas compartilha repositório Git comum e não é sandbox contra processo com as permissões do usuário; race com processo externo, hooks/filters e particularidades de case/Unicode podem impedir garantia absoluta. Recuperação de commit efetuado sem confirmação SQLite pode requerer resolução humana. Locks dependem de identidade confiável por sistema operacional. Esses riscos exigem detecção e falha segura, sem prometer atomicidade distribuída.
 
-Estado: **F4-01 a F4-09 implementadas localmente; F4-10 em homologação local**. A CI remota nas versões Python 3.11, 3.12 e 3.13 depende da publicação autorizada da branch. Não foram feitos commit, push ou merge nesta etapa.
+Estado: **Fase 4 concluída e integrada** pelo PR #4, com head `709e77ad46dfa3283922856fd078b6baca1b6029`, merge `8ec623813709d71b98fbd0be7e8fba87ebb9d565` e seis checks CI aprovados. Consulte [progresso da Fase 4](phase-4-progress.md).
 
 ## Fase 5 — validação independente, quality gates e entrega
 
-Estado: **F5-01 concluída antes de qualquer código**: limites, perfis/capacidades, retenção, limpeza e política de segredos fixados em arquitetura/ADR. Ver [parâmetros operacionais](architecture.md#f5-01--parâmetros-operacionais-fixados), [arquitetura](architecture.md#fase-5--validação-independente-quality-gates-e-entrega) e [ADR 0005](decisions/0005-phase-5-validation-delivery.md). Nenhum outro componente foi implementado antes deste gate.
+Estado: **Fase 5 homologada e integrada** pelo PR #5. Head `51db15a06672c9ffa1b3f4ac2914410ee4d10b08`, merge sem reescrita `bf558211a80038efddde36332d8c09a8157cd903`; seis jobs CI Python 3.11/3.12/3.13 (push e PR) passaram. Ver [progresso da Fase 5](phase-5-progress.md).
 
 ### Ordem definitiva e critérios F5-01 a F5-10
 
@@ -219,3 +220,77 @@ Estado: **F5-01 concluída antes de qualquer código**: limites, perfis/capacida
 Runtime local sob o mesmo usuário não é sandbox: não oferece contenção forte de filesystem/rede quando o OS não expõe controle confiável. Docker amplia isolamento, mas depende de daemon, kernel, image supply-chain, configuração e mounts. ACL, symlinks, permissões, locks, limites de recursos, signals e identidade de processo diferem entre Linux e Windows; capacidade indisponível deve ser explícita e bloqueada conforme política. Redaction não identifica todos os segredos. Builds/tests podem ser não determinísticos; proveniência e digests provam entradas, não comportamento correto. Entrega remota pode ter efeitos irreversíveis e resposta perdida; reconciliação pode exigir operador humano. Migração e retenção podem exigir recuperação manual.
 
 Pronto para implementação após aprovação deste fechamento, desde que F5-01 fixe e teste valores/limites mensuráveis de recursos, logs, artefatos e retenção para cada backend/plataforma antes de F5-02/F5-03 alterarem interfaces e dados. Nenhum risco de runtime local pode ser descrito como isolamento garantido.
+
+## Fase 6 — extensibilidade de agentes e contratos de modelo
+
+### Escopo e limites
+
+O roadmap reserva F6 para extensibilidade de agentes. A prioridade de integração é **Antigravity → Claude Code → OpenCode → Hermes Agent**, nesta ordem organizacional. Codex segue compatível. F6 prepara os contratos de seleção/modelo e integra as ferramentas nessa prioridade conforme cada superfície técnica for confirmada.
+
+F6 não implementa classificador, seleção automática, escalonamento, retry automático, troca automática de modelo/provider nem decisão de orçamento. Seleção manual é por tentativa e só é registrada como efetiva quando o adapter/provider conseguir confirmá-la. Erros de ambiente, autenticação, quota ou infraestrutura nunca são classificados nesta fase como insuficiência do modelo. Docker, quality gates, builds, entrega e conclusão ficam fora do escopo.
+
+O Toolkit permanece opcional. Qualquer integração exige avaliação de uma revisão/fonte e arquivos exatos, licença, proveniência, dependências e conflitos com políticas AgentFlow; a decisão de não integrar/deferir é válida. Não buscar, instalar, executar prompt nem alterar projeto automaticamente.
+
+### Contratos separados
+
+- `AgentAdapter`: integração com a ferramenta (Antigravity, Claude Code, OpenCode, Hermes Agent ou Codex); prepara a execução, verifica capabilities efetivas e interpreta o processo. Não escolhe modelos automaticamente, não repete e não conclui tarefa.
+- `ProviderDescriptor`: identidade/API/version do provider de modelos, capabilities, limites, autenticação por referência e disponibilidade verificável. Nunca inclui credenciais.
+- `ModelDescriptor`: identidade/revisão, provider relacionado, version, capabilities, context/modalidades/tools, disponibilidade observada com instante/fonte e metadados de preço com unidade/moeda/fonte quando verificáveis. Aliases mutáveis e preço desconhecido são tratados como tais.
+- `ModelSelection`: escolha imutável por `attempt_id`, com agent, provider/model ID e versions, digests dos descriptors, modo manual/default, motivo/autor/tempo e identidade efetiva reportada. Divergência/inobservabilidade não troca modelo; registra `unknown`/`inconclusive` conforme contrato fechado em F6-01.
+- `ModelRoutingPolicy`: contrato/schema versionado para fase futura: features/classificação, requisitos de capacidade, pesos e limites, budgets, gatilhos de escalation, falhas excluídas, autorização e auditoria. Em F6 é descritivo, snapshot/digest testado, proibido de ser executado.
+
+O catálogo pode combinar registros declarados/versionados e disponibilidade consultada; resultado de disponibilidade deve ter timestamp/fonte e validade limitada. Não se presume acesso a catálogo remoto nem que ferramenta exponha provider/model. Snapshot de catálogo distribuído deve identificar versão e digest. Overrides/policies de projeto, se aprovados, são embutidos em `.agentflow/spec.toml`; ADR 0002 não permite adicionar outro arquivo versionado nesta fase. Disponibilidade e `ModelSelection` são estado operacional SQLite, não alterações de TOML. F6-04 verificou a compatibilidade com SQLite v4 e adicionou schema v5 apenas ao perfil `AgentExecutionStore`, preservando perfis legados. TOMLs antigos seguem legíveis; seleção/credenciais não são gravadas em arquivos operacionais versionados.
+
+### Fechamento do gate F6-01
+
+F6-01 foi concluída satisfatoriamente por auditoria documental oficial em 2026-11-05. O CLI Antigravity `agy` tem modo headless destinado a automação, protocolo stream-json, seleção manual via `--model`, status/erros estruturados, versão consultável (`agy --version`) e controles documentados de permissão/sandbox. O alvo F6-06 fica restrito a CLI headless e às versões/plataformas efetivamente homologadas. A documentação lista CLI v1.2+; isso é piso para preflight, não certificação de versões futuras.
+
+O preflight verifica executável, versão, flags e capabilities sem iniciar agente. Seleção explícita só é confirmada pelo campo `model` do evento `init`; campo ausente/divergente fica `unknown` e produz resultado inconclusivo sem retry/fallback. `permission_mode` pode ser capturado; sandbox/rede sem atestação de enforcement ficam `unknown` e bloqueiam perfis que os exijam. Headless pode soft-deny ações de ferramenta e ainda retornar código zero, então status, stderr, eventos e exit code são interpretados em conjunto. O adapter não altera configurações do usuário; `--dangerously-skip-permissions` exige autorização específica registrada. Nenhum agente foi executado na pesquisa.
+
+  Decisões fechadas: somente adapters built-in explicitamente registrados; nenhuma descoberta dinâmica/plugins; Toolkit fora do runtime e sem conteúdo incorporado; `ModelRoutingPolicy` é schema versionado não executável; sem router, retry, fallback, escalation ou troca automática. F6-04 inspecionou o schema v4 e adicionou migração v5 isolada ao perfil de execution store. Claude Code e OpenCode tiveram suas superfícies documentadas oficialmente verificadas antes da integração. As versões concretas disponíveis no host/provider e o suporte por plataforma ainda não foram homologados com execução real.
+
+### Ordem proposta F6-01 a F6-10
+
+| ID | Tarefa | Dependências | Critérios verificáveis |
+| --- | --- | --- | --- |
+| F6-01 | Fechar ADR 0006 e validar adequação técnica do Antigravity | F1–F5 | **Concluída:** documentação oficial comprova CLI headless adequado; versão/capabilities preflight sem agente; modelo manual verificável; controle não observável = unknown/fail-closed; decisões de plugins, Toolkit, persistência condicional e policy futura fechadas. Router/retry/fallback excluídos. |
+| F6-02 | Formalizar `AgentAdapter`, registry e capabilities da ferramenta | F6-01 | API versionada, registry determinístico, sem import automático; adapter simulado substitui cada implementação; não altera execução/validação/conclusão. |
+| F6-03 | Formalizar `ProviderDescriptor` e `ModelDescriptor` | F6-01, F6-02 | Identidade/versão/capabilities/availability/preço com fonte/unidades explícitos; provider/model ocultos ficam unknown; disponibilidade stale detectável. |
+| F6-04 | Formalizar e persistir `ModelSelection` manual por tentativa | F6-02, F6-03 | Seleção vinculada a attempt/request digest, imutável e auditável; conflito entre selected/effective não causa fallback; v4 compatível ou migration v5 rollback-safe. |
+| F6-05 | Definir schema versionado de `ModelRoutingPolicy` para uso futuro | F6-03, F6-04 | Schema valida budget/rules/authorization snapshots e digest; testes comprovam que F6 não avalia/executa a policy nem seleciona/escalona modelo. |
+| F6-06 | Integrar Antigravity (prioridade 1) | F6-02 a F6-04 | **Implementada localmente:** documentação oficial confirma superfície `agy` headless; versão/flags/modelos preflight; modelo só confirmado pelo `init`; controles sem atestação = unknown e políticas incompatíveis bloqueiam; testes usam fake, nenhum agente real. Versão instalada/plataforma homologada pendente. |
+| F6-07 | Integrar Claude Code (prioridade 2) | F6-06 | **Implementada localmente:** preflight `--version`/`auth status`, seleção `--model`, stream JSON e modelo confirmado por `system/init`; sem alterar settings, sem permissão ampliada. Sandbox restrita a shell e unknown fora dessa capacidade; API retry interno não repete tentativa AgentFlow. Homologação de versão/plataforma real pendente. |
+| F6-08 | Integrar OpenCode (prioridade 3) | F6-07 | **Implementada localmente:** `run --format json`, provider/model explícitos, catálogo configurado sem refresh, `--pure` desabilita plugins externos no subprocesso; sem `--auto`. Campos de identidade efetiva ausentes/divergentes resultam unknown/mismatch; sandbox/rede unknown. Versão/plataforma real pendente. |
+| F6-09 | Avaliar integração opcional Vibe Coding Toolkit e realizar testes cross-adapter | F6-01 a F6-08 | Decisão: não incorporar código, prompts ou dependência; nenhuma licença/proveniência upstream será presumida. Conformance, idempotência, reabertura, cancelamento e unknown devem passar com simuladores. |
+| F6-10 | Docs, package, CI e homologação F6 | F6-01 a F6-09 | **Reavaliada com F6-11:** suíte completa, wheel/venv limpo, CLI smoke e `git diff --check` serão repetidos; CI deve executar Python 3.11–3.13 em Windows e Linux. Nenhum agente real, router ou retry automático. |
+| F6-11 | Integrar Hermes Agent (prioridade 4) | F6-02 a F6-04, F6-06 a F6-10 | Adapter usa apenas CLI oficial; preflight verifica versão/flags; provider/model manuais; JSONL processado linha a linha, resultado terminal e exit code consistentes; seleção sem provider observável fica unknown; toolset restrito a `file`, sem memória/skills/delegação/terminal; timeout/cancelamento do runtime preservados; testes simulados e regressão dos adapters anteriores aprovados. |
+
+### Matriz de testes F6
+
+1. Contratos separados, versão de API, compatibilidade Codex e IDs/versions estáveis.
+2. Provider/model catalog: duplicate IDs, aliases mutáveis, indisponibilidade/stale, preço/currency unknown e capability divergente.
+3. Seleção manual: model/provider selecionado e efetivo coincidem; divergência/inobservabilidade não troca provider nem cria retry; operação idempotente preserva snapshot.
+4. ModelRoutingPolicy: schema, budget/authorization snapshot e digest; policy never executed in F6; auto router code path absent.
+5. Adapters Antigravity→Claude Code→OpenCode→Hermes: fakes de CLI/API/protocol, argumentos, versão, cancelamento, saída estruturada, toolset mínimo e plataformas; nenhum agente real.
+6. Segurança: credenciais só por referências; logs/SQLite sem segredo; adapter que não prova sandbox/aprovação/rede falha fechado; plugin não autorizado não importa.
+7. SQLite/TOML/workspaces: compatibilidade v1–v3, migração condicional v5/rollback, reabertura, operação idempotente, checkpoint e evidências preservados.
+8. Recovery: failure categories distinguem insuficiência do modelo de ambiente/auth/infra; nenhuma falha ambígua se converte em escalation ou replay.
+9. Toolkit: revisão upstream fixa, lista de arquivos, licenças/proveniência e hashes; integração ausente não acessa rede nem modifica conteúdo.
+10. Homologação: pytest, package smoke, diff check e CI Python 3.11–3.13 em plataformas aprovadas.
+
+## Fase 7 — orquestração inteligente de modelos (futura)
+
+F7 recebe os contratos da F6 para decidir modelos automaticamente. A implementação depende de aprovação própria e deve incluir:
+
+1. Classificador de complexidade com versão, evidências de classificação e opção de override manual.
+2. Catálogo versionado e auditável de providers/modelos, capabilities, disponibilidade, custo e latência, fixado por versão/digest do pacote ou de `spec.toml`.
+3. Seleção por capability, qualidade observada, custo, latência e risco: modelos econômicos para tarefas simples, intermediários para implementação convencional e avançados para planejamento, arquitetura, revisão crítica e problemas complexos.
+4. Budgets hard para custo, tokens, tempo e tentativas; previsão vs. consumo real e bloqueio ao atingir limites.
+5. Escalonamento somente quando validação independente provar que critérios verificáveis não foram satisfeitos por insuficiência do modelo; falhas de ambiente/auth/quota/infra não escalam.
+6. Escalonamento cria nova tentativa/seleção auditável; não repete tentativa com efeito desconhecido, preserva checkpoint/workspace e exige reconciliação conservadora.
+7. Autorização explícita e versionada para troca de modelo/provider, com controles para seleção manual, consentimento e limites de policy; sem autorização da operação, a seleção não muda.
+8. Validação independente permanece separada e não pode ser substituída por autoavaliação do modelo.
+9. Auditoria, métricas, comparação controlada de qualidade/custo/latência e testes de regressão por tarefa/modelo.
+10. CI, segurança, recovery e homologação da matriz de providers/plataformas autorizada: Python 3.11, 3.12 e 3.13 em Linux e Windows.
+
+F7 não é autorizado por este planejamento; nenhum componente de roteamento automático será implementado na Fase 6.

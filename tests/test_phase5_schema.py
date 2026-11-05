@@ -84,16 +84,16 @@ def test_v4_migration_failure_rolls_back_entire_schema(tmp_path, monkeypatch):
     assert list(tmp_path.glob("state.sqlite3.*.bak"))
 
 
-def test_v4_rejects_future_database_version_without_mutation(tmp_path):
+def test_v4_reader_rejects_future_database_version_without_mutation(tmp_path):
     path = tmp_path / "state.sqlite3"
     with ExecutionStore(path):
         pass
     with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version=5")
+        db.execute("PRAGMA user_version=6")
     with pytest.raises(IntegrityError, match="futura"):
         ValidationStateStore(path)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert db.execute("SELECT name FROM sqlite_master WHERE name='validation_operations'").fetchone() is None
 
 

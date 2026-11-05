@@ -20,7 +20,7 @@ agents -> interface de runtime; adaptadores concretos ficam nas bordas
 | `core` | Coordena transições e políticas; não conhece subprocessos, SQLite ou Docker diretamente. |
 | `planning` | Lê especificações, tarefas, dependências e critérios; entrega plano validado e imutável ao núcleo. |
 | `state` | Repositório de estados, tentativas, eventos e retomada; implementação SQLite com transações em fase posterior. |
-| `agents` | Protocolo de execução de tarefa e resultados; primeiro adaptador Codex CLI em fase posterior. |
+| `agents` | Contratos agent/provider/model e adapters; Codex permanece compatível, F6 prepara Antigravity → Claude Code → OpenCode → Hermes Agent, sem seleção automática de modelos. |
 | `runtime` | Protocolo de processos isolados; implementações local e Docker em fases posteriores. |
 | `validation` | Executa verificações declaradas e devolve evidência estruturada; não decide sozinho a conclusão. |
 | `git` | Consulta repositório e cria branches/checkpoints apenas quando uma política futura autorizar. |
@@ -151,7 +151,7 @@ Uma tarefa tem no máximo uma tentativa ativa; uma tentativa referencia exatamen
 
 ## Fase 4 — recuperação e integração explícita com Git (fechamento arquitetural)
 
-**Estado:** arquitetura aprovada; F4-01 a F4-09 implementadas localmente na branch `feat/git-recovery-phase-4`. F4-10 aguarda suíte final e CI remota após autorização de publicação. Base: Fase 3 integrada à `main` no merge commit `edb7c4f7f0e672d8d1432d2d8948c3b49b7f4b91`. Nenhuma execução de agente é iniciada autonomamente; Git remoto, push, pull/fetch, merge/rebase e deploy estão fora da fase.
+**Estado:** F4-01 a F4-10 homologadas e integradas pelo PR #4. Commit revisado: `709e77ad46dfa3283922856fd078b6baca1b6029`, com seis jobs Python 3.11/3.12/3.13 aprovados. Merge sem reescrita: `8ec623813709d71b98fbd0be7e8fba87ebb9d565`; `origin/main` apontava para esse commit na confirmação de 2026-11-05. Evidências em [progresso da Fase 4](phase-4-progress.md). As restrições operacionais do ADR 0004 permanecem.
 
 ### Invariantes: execução, validação, conclusão
 
@@ -223,7 +223,7 @@ A Fase 4 evolui `tasks.toml` para schema v2, com `versioned_paths` obrigatório 
 
 ## Fase 5 — validação independente, quality gates e entrega
 
-**Estado:** implementação local autorizada após fechamento de F5-01, cujos valores operacionais estão fixados abaixo. A Fase 4 está integrada à `main` no merge commit `8ec623813709d71b98fbd0be7e8fba87ebb9d565`. Docker é runtime opcional. Validação, build, entrega e conclusão são operações distintas.
+**Estado:** F5-01 a F5-10 homologadas e integradas pelo PR #5. Head aprovado `51db15a06672c9ffa1b3f4ac2914410ee4d10b08`; merge sem reescrita `bf558211a80038efddde36332d8c09a8157cd903`; os seis jobs Python 3.11/3.12/3.13 (push e PR) passaram. Ver [progresso da Fase 5](phase-5-progress.md). Docker é runtime opcional. Validação, build, entrega e conclusão são operações distintas.
 
 ### F5-01 — parâmetros operacionais fixados
 
@@ -322,3 +322,82 @@ Build registra commit/tree e snapshot digest, gate/run de origem, builder e vers
 - Local e Docker são runtimes distintos; Docker é opcional. CI/plataformas testam capacidades disponíveis e reportam indisponíveis sem alegar isolamento.
 
 Ver [plano e ordem F5-01–F5-10](implementation-plan.md#fase-5--validação-independente-quality-gates-e-entrega) e [ADR 0005](decisions/0005-phase-5-validation-delivery.md).
+
+## Fase 6 — ecossistema de adaptadores e integração opcional
+
+**Base do escopo:** o roadmap em `implementation-plan.md` reserva a Fase 6 para adaptadores de outros agentes e uma possível integração opcional com Vibe Coding Toolkit. ADR 0001 determina que adaptadores usem a interface comum e que qualquer reutilização do Toolkit dependa de revisão legal e técnica. A Fase 3 já fornece `AgentAdapter`, `ExecutionRequest`, `ProcessSpec` e `AgentResult`; a Fase 6 deve evoluir essa fronteira sem acoplar o núcleo a um fornecedor.
+
+### Objetivos e limites
+
+- Preparar integrações com Antigravity, depois Claude Code, OpenCode e Hermes Agent, preservando Codex e mantendo execução de uma tarefa por pedido, políticas de tentativas, estado e recuperação das Fases 2–4. A ordem é prioridade de integração, não troca automática de ferramenta.
+- Formalizar separadamente `AgentAdapter`, `ProviderDescriptor`, `ModelDescriptor`, `ModelSelection` e `ModelRoutingPolicy`. Na Fase 6, `ModelRoutingPolicy` é apenas contrato/extensibilidade futura: não classifica, roteia, escala nem repete tentativas automaticamente.
+- Formalizar identidade/versionamento/capabilities de adaptadores e o mapeamento das políticas genéricas para capacidades reais do provider. Um adapter que não possa cumprir a política solicitada é recusado antes do spawn; não há downgrade nem fallback silencioso.
+- Definir registro/resolução explícita de adaptadores confiáveis, configuração não secreta do projeto e configuração local de executáveis/credenciais, preservando compatibilidade dos TOMLs existentes.
+- Avaliar o Vibe Coding Toolkit como fonte potencial de instruções, prompts ou templates opcionais. Não tratá-lo como runtime de agente nem supor API de plugin. Qualquer integração depende de revisão de licença, proveniência/versionamento, compatibilidade e manutenção; código ou conteúdo não será copiado automaticamente.
+- Preservar Codex CLI 0.166.0 como a versão já homologada; ampliar suporte Codex não é objetivo implícito da Fase 6.
+- Não expandir Docker, runtimes de validação, quality gates, builds ou fronteira de entrega. Eles permanecem componentes das Fases 3 e 5. Não introduzir execução automática, concorrência de agentes ou novas políticas de retry.
+- Não trocar modelo ou provider automaticamente, não criar nova tentativa automaticamente e não escalonar após falha na Fase 6. Seleção manual é permitida somente quando o adapter/provider consegue identificar e confirmar o modelo efetivo.
+
+### Contratos e componentes propostos
+
+- `AgentAdapter`: integração com a ferramenta (Antigravity, Claude Code, OpenCode, Hermes Agent ou Codex): prepara a chamada, reporta/verifica capabilities efetivas, converte a solicitação para o runtime existente e interpreta o resultado do processo. Não escolhe modelo por heurística, não repete, não escalona e não conclui tarefa.
+- `ProviderDescriptor`: identidade estável do provider de modelos, versão/API, mecanismos de autenticação por referência, capacidades e limites verificáveis; não contém segredo. Se a ferramenta encapsular o provider ou não expuser identidade confiável, registrar `unknown` e não inventar fornecedor.
+- `ModelDescriptor`: identidade estável e versão/revisão do modelo, `provider_id`, capabilities, limites relevantes (p.ex. contexto/modalidades/tools), disponibilidade observada (`available`, `unavailable`, `unknown` com instante/fonte) e metadados de custo/unidades quando verificáveis. Alias mutável sozinho não é identidade suficiente.
+- `ModelSelection`: escolha imutável vinculada a uma tentativa (`attempt_id`), contendo seleção manual ou default explícito, `agent_id`, `provider_id`, `model_id`, versões e digests dos descriptors, motivo/autor, instante e o modelo efetivamente reportado pelo provider. Divergência entre pedido e modelo efetivo é resultado inconclusivo até reconciliação; não troca silenciosamente.
+- `ModelRoutingPolicy`: contrato versionado destinado à fase futura, incluindo critérios de complexidade/capacidade, pesos/limites de custo/latência/risco, budgets, gatilhos de escalonamento, exclusões de falhas ambientais e autorização. Fase 6 define estrutura e digest do snapshot apenas; o executor a rejeita como não executável e não aplica regra de seleção automática.
+- `AgentProfile`: referência ao `agent_id`, constraints obrigatórias e parâmetros não secretos/versionados. Caminho do executável, localização de instalação e referências a credenciais ficam na configuração operacional local; valores secretos nunca entram em TOML versionado, request digest, logs ou SQLite.
+- `AgentRegistry`/`AdapterResolver`: registro determinístico apenas de adapters built-in aprovados e resolução por ID explícito. Plugins dinâmicos, entry points e importação de extensões de terceiros estão excluídos da Fase 6.
+- `AgentAdapter` permanece protocolo de integração com a ferramenta, versão de API separada da versão do executável/provider. Preparação sem efeitos, capabilities negociadas, `ProcessSpec` e interpretação de `ProcessResult` em `AgentResult`; execução continua delegada a `ProcessRuntime`.
+- `ProviderDescriptor` e `ModelDescriptor` são catálogos/identidades distintos do adapter. Adapter pode expor vários providers/modelos ou nenhum modelo identificável; valores não verificáveis ficam `unknown`, nunca inferidos pelo nome da ferramenta.
+- `ExecutionRequest` recebe seleção manual opcional e suas restrições. Cada tentativa grava `ModelSelection` imutável antes do spawn; a execução registra provider/model efetivos após execução quando a ferramenta os expõe. Se não houver confirmação do modelo efetivo, não alegar que o selecionado foi usado.
+- Snapshot persistido contém `agent_id`, adapter/API/provider/model versions, digests dos descriptors/profile/policy e capabilities efetivas. Tentativas antigas permanecem interpretáveis sem reler configuração mutável.
+- Configuração: preservar `.agentflow/spec.toml` e `.agentflow/tasks.toml` antigos. Avaliar schema versionado de perfil de agente em `spec.toml` e seleção por pedido explícito na CLI; dados de instalação e credenciais continuam em `config.toml` operacional ignorado. Qualquer policy/allowlist de projeto versionável entra em `spec.toml`; não criar terceiro arquivo TOML versionado sem revisar ADR 0002. `ModelSelection` e disponibilidade observada são estado local SQLite, não definições versionadas. Não exigir mudança de `tasks.toml`, a menos que seja necessário expressar requisitos por tarefa e isso seja aprovado.
+- Persistência: `execution_attempts` já registra `adapter_name`, `adapter_version`, capabilities, sandbox/aprovação efetivos e digest de pedido. Auditar se isso representa suficientemente o provider, adapter API e perfil; qualquer migração SQLite v5 é condicional, backup-first, transacional, rollback-safe e sem reinterpretar tentativas antigas.
+- O Toolkit não será dependência nem fornecerá código/conteúdo à Fase 6. F6-09 limita-se à avaliação documental de licença/proveniência; qualquer integração futura exige autorização própria.
+
+### Fluxo e invariantes de compatibilidade
+
+1. Resolver registra explicitamente o tool/agent na prioridade Antigravity → Claude Code → OpenCode → Hermes Agent; cada integração é opt-in e pré-checada. Codex segue compatível.
+2. `ProviderDescriptor` identifica serviço/model provider; `ModelDescriptor` identifica modelo e disponibilidade. Ferramenta que encapsula ou oculta isso reporta desconhecido; nenhuma inferência baseada em aliases.
+3. Seleção de modelo, quando suportada, vem do usuário e se fixa em `ModelSelection` antes do spawn. F6 não altera seleção nem provider automaticamente.
+4. Resolver verifica API/provider version, plataforma, executable, capabilities e modelo selecionado antes da reserva; restrição não suportada bloqueia sem fallback.
+5. A reserva SQLite continua anterior ao spawn, com `operation_id` idempotente e proveniência imutável. Reabrir tentativa usa snapshot persistido; não relê configuração para reinterpretar resultado.
+6. `ProcessResult` continua distinto de `AgentResult`, validação, evidências, checkpoint e conclusão. Nenhum modelo ou agent atesta a própria qualidade; conclusão continua independente.
+7. Execução não passa a ser automática ou paralela; F6 não cria retry, escalation ou troca automática. Workspace, branch/checkpoint, pathset, logs e cleanup continuam sujeitos aos ADRs 0003/0004/0005.
+
+### Decisões fechadas e pendências antes da homologação final
+
+As decisões arquiteturais F6-01 a F6-11 estão fechadas e registradas em [ADR 0006](decisions/0006-agent-ecosystem.md). As documentações oficiais Antigravity, Claude Code, OpenCode e Hermes foram consultadas antes dos adapters. Restam somente homologação remota e confirmação de capacidades em instalações/provider reais; nenhum agente real foi executado:
+
+1. Versões instaladas, autenticação real e suporte de plataforma aguardam CI Linux/Windows × Python 3.11/3.12/3.13; documentação não é homologação de runtime.
+2. F6-04 mapeou snapshots ao SQLite v4 e isolou migração v5 para `AgentExecutionStore`; histórico antigo não é reinterpretado.
+3. `ModelRoutingPolicy` foi fixado em F6-05 e segue não executável nesta fase.
+4. Vibe Coding Toolkit fica fora do runtime e sem código/conteúdo copiado. F6-09 registra a decisão de não integrar.
+
+### Resultado de F6-01 — Antigravity
+
+Consulta à documentação oficial em 2026-11-05 confirmou o CLI `agy` com headless mode destinado a automação. A versão é obtida com `agy --version` (documentação indica superfície CLI v1.2+); versões/flags/capabilities precisam ser verificadas antes de spawn, e somente versões homologadas entram na matriz do AgentFlow. Instalação documentada abrange Windows 10/11, macOS 12+ e Linux (glibc >= 2.28, glibcxx >= 3.4.25; x64/ARM64 nas páginas de download).
+
+`-p`/`--print`, JSONL via stdin, `text`/`json`/`stream-json` via stdout, diagnósticos em stderr, timeout de prompt, status terminal e erros fornecem fronteira programática adequada. `--model` escolhe slug explícito e stream `init` reporta `model` quando fixado; o evento também reporta `permission_mode`. O status e a saída precisam ser lidos junto ao exit code: ferramenta negada em headless pode ser soft-denied e ainda sair com zero. Cancelamento é suportado por interrupção/SIGINT; gestão de árvore de processos e recuperação do pai continuam responsabilidade do `ProcessRuntime` AgentFlow.
+
+Permissões são configuráveis por settings/modo/regras e `--dangerously-skip-permissions` existe, mas nunca será adicionado implicitamente. Sandbox tem flag/configuração; a própria documentação declara que a flag pode não ter efeito se o recurso não existir. O protocolo não oferece prova completa de enforcement de sandbox/rede. Nesse caso, capacidade = `unknown`; perfil que exigir enforcement bloqueia antes do spawn. F6 não declara isolamento efetivo sem atestação. A integração primária escolhida é o CLI; a SDK Python é documentada, mas não substitui esta fronteira pois não foi comprovado um contrato de modelo/processo compatível com a persistência e recuperação do AgentFlow.
+
+Fontes oficiais consultadas: [Getting Started](https://antigravity.google/docs/getting-started?tab=cli), [Headless mode](https://antigravity.google/docs/cli/headless/), [CLI flags](https://antigravity.google/docs/cli/reference/), [models](https://antigravity.google/docs/models/), [permissions](https://antigravity.google/docs/permissions/), [settings](https://antigravity.google/docs/settings/) e [SDK overview](https://antigravity.google/docs/sdk/overview/). A consulta foi documental: nenhum agente real foi iniciado.
+
+Decisões de aplicação: seleção manual e imutável por tentativa; modelo não reportado ou divergente é `unknown`/`inconclusive`; nenhuma inferência de provider pelo nome do produto; nenhuma troca, fallback, escalation ou retry; `agy` headless é o único alvo Antigravity de F6; adapters são built-in e explicitamente registrados, sem descoberta dinâmica. OpenCode usa `--pure` para não carregar plugins externos no subprocesso e não usa `--auto`; isso não altera configurações do usuário. Hermes usa `chat --oneshot --query-file - --format stream-json`, provider/model explícitos, `--toolsets file`, `--safe-mode` e `--ignore-rules`; não adiciona credenciais ao ambiente, não habilita memory/skills/delegation/terminal, e não altera a configuração Hermes. O evento oficial `system/init` comprova `model`, mas não garante provider; sem campo provider explícito, seleção geral fica `unknown`. Sandbox/rede são desconhecidos quando não atestados e políticas obrigatórias bloqueiam. Toolkit não é dependência nem fonte de código nesta fase. O comando `--dangerously-skip-permissions` requer autorização explícita por operação. Segredos não entram em TOML versionado, digest, logs ou SQLite.
+
+Claude Code é invocado em `-p` com modelo explícito e prompts de permissão negados; isso não concede acesso. Seu relato de modelo em `system/init` é necessário para confirmar seleção. A sandbox documentada é limitada a comandos shell em macOS/Linux/WSL2, e não é tratada como sandbox geral. Eventos internos `api_retry` são registrados como observação do CLI e não causam nova tentativa AgentFlow. OpenCode recebe `provider/model` explícito e inventário de modelos sem refresh; apenas campos de identidade estruturados no JSON podem confirmar o modelo efetivo. Ausência desses campos deixa a seleção `unknown`.
+
+Hermes transmite o prompt pelo stdin via `--query-file -`, e o runtime conserva timeout, encerramento da árvore, logs com redaction e identidade de processo. O parser consome JSONL linha a linha, exige `system/init` e `result` terminal únicos e valida que o exit code do envelope coincide com o do processo. O adaptador aceita apenas eventos `tool_use` do conjunto oficial `file`; evento de outra ferramenta, JSON malformado, stream incompleto ou resultado inconsistente não pode virar sucesso. O protocolo atual não atesta credenciais/provider efetivos, sandbox ou rede; esses valores permanecem unknown. Nenhum código/dependência do Hermes é importado.
+
+### Riscos e compatibilidade
+
+Providers e modelos diferem em CLI, streaming, cancelamento, identificação efetiva, disponibilidade, custo e semântica de saída. Uma disponibilidade consultada pode ficar obsoleta; preço/tokens podem ser inexatos. Compatibilidade não se infere pela presença de binário ou flag. Plugins Python são código executável no processo AgentFlow. Prompt packs podem conflitar com políticas ou se tornar obsoletos. Persistência deve preservar seleção e motivo sem reinterpretar tentativas antigas. Não garantir equivalência entre providers; preservar Codex e não ampliar sua matriz de versões implicitamente. A política de roteamento só poderá escalar quando houver evidência verificável de insuficiência do modelo, excluindo falha de ambiente, autenticação ou infraestrutura; budgets e autorização de mudança serão hard limits.
+
+¹ Referência consultada para escopo, não aprovada para reutilização: [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit). A revisão de uma revisão upstream exata e de seu conteúdo/licença é critério de F6-09; integração ausente é resultado válido.
+
+## Fase futura — orquestração inteligente de modelos
+
+Após a preparação de contratos na Fase 6, uma fase dedicada poderá implementar `ModelRoutingPolicy`. Seu escopo futuro inclui classificador de complexidade; catálogo versionado de `ProviderDescriptor`/`ModelDescriptor` (manifesto versionado no pacote AgentFlow, com snapshots/digests; qualquer override por projeto limitado a `spec.toml`); modelos econômicos para tarefas simples, intermediários para implementação convencional e avançados para planejamento/arquitetura/revisão crítica; seleção por capacidade, qualidade observada, custo, latência e risco; escalonamento somente quando validação independente mostrar que critérios verificáveis não foram satisfeitos; budgets rígidos de custo/tokens/tempo/tentativas; auditoria das decisões e motivos; métricas, regressão e comparação de qualidade. Disponibilidade observada é local/temporal e não reescreve TOML. Erro de ambiente, autenticação, quota ou infraestrutura não constitui evidência de insuficiência e não dispara escalation.
+
+Cada mudança de modelo/provider será uma decisão auditável ligada a uma tentativa e a uma seleção, não uma repetição transparente. A política de autorização deve exigir consentimento explícito para troca de provider/modelo, com modo manual sempre disponível, limites invioláveis e recuperação conservadora de tentativas/checkpoints existentes. Essa fase não é parte do trabalho F6 e requer planejamento/aprovação próprios antes da implementação.
