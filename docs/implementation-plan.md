@@ -64,3 +64,41 @@ Instalação reproduzível com Python 3.11+; `agentflow --version`, `init` e `do
 - CI do GitHub: os jobs Python 3.11, 3.12 e 3.13 passaram nas execuções de push e Pull Request #1. A Fase 1 está pronta para revisão e merge, sem merge automático.
 
 Revalidação antes da publicação: a suíte passou novamente com `--basetemp .pytest-run` (17 aprovados). Dois testes foram corrigidos para usar um caminho inexistente explícito; assim não dependem da localização do diretório temporário em relação a um repositório Git pai.
+
+## Fase 2 — plano técnico proposto para revisão
+
+A Fase 1 foi integrada à `main` no PR #1. A implementação local da Fase 2 foi autorizada, sem push ou merge. Esta seção delimita especificações, tarefas, dependências e estado operacional. Os contratos detalhados, o esquema de tabelas, as transições e a recuperação estão em [architecture.md](architecture.md#fase-2--planejamento-e-estado). O progresso verificável está em [phase-2-progress.md](phase-2-progress.md).
+
+### Ordem de implementação e critérios de aceite
+
+| ID | Tarefa | Dependências | Critério de aceite verificável |
+| --- | --- | --- | --- |
+| F2-01 | Registrar em ADR as decisões consolidadas na arquitetura: ignore seletivo, revisão imutável, evidências, reconciliação, WAL/durabilidade/backup e `operation_id`; fixar parâmetros operacionais e exemplos. | Fase 1 | ADR aprovado especifica `busy_timeout`, identidade de reserva, autoria de evidência e formato canônico de digest; mudanças restantes são risco explícito, não escolha implícita no código. |
+| F2-02 | Definir `spec.toml` e `tasks.toml` v1, IDs de critérios, modelos imutáveis, normalização e evolução de versão. | F2-01 | Arquivos válidos produzem o mesmo plano/digest independentemente da ordem de leitura; versão futura/chave/tipo/ID/critério inválido falham com local preciso; originais não são editados. |
+| F2-03 | Validar referências, unicidade e DAG de dependências; produzir ordem topológica estável. | F2-02 | Referência ausente, ID duplicado, autodependência e ciclos simples ou longos são rejeitados com ciclo identificável; permutação de entrada não muda a ordem canônica. |
+| F2-04 | Definir protocolo do repositório, comandos de transição/evidência/revalidação e erros de domínio sem importar SQLite no núcleo. | F2-02, F2-03 | Implementação simulada e núcleo importam sem SQLite; guardas, revisão esperada e idempotência por ID+digest têm testes de contrato. |
+| F2-05 | Criar esquema SQLite v1, FKs, índices, WAL, `busy_timeout`, `synchronous=FULL`, backup consistente e migração inicial. | F2-01, F2-04 | Banco novo abre com versão correta; FKs ativas por conexão; falha de backup impede migração; falha transacional preserva versão anterior; versão futura é recusada; `foreign_key_check` e `integrity_check` passam. |
+| F2-06 | Persistir plano validado, revisões imutáveis e digests, com importação idempotente e revalidação explícita de definições alteradas. | F2-03, F2-05 | Duas importações iguais não duplicam registros; inserção parcial reverte tudo; plano inválido não toca banco; reabertura com tarefa iniciada alterada bloqueia transição até decisão auditável; histórico não é apagado. |
+| F2-07 | Implementar máquina de estados, evidências estruturadas, operações idempotentes, eventos append-only, checkpoints lógicos e liberação transacional de dependentes. | F2-04, F2-06 | Status, evidência, operação, evento e checkpoint são atômicos; evidência declarada não satisfaz conclusão; ID repetido com mesmo digest retorna resultado anterior, digest divergente falha; concorrência não reserva tarefa duas vezes. |
+| F2-08 | Implementar abertura/reabertura, integridade e reconciliação determinística de reservas sem efeitos externos. | F2-07 | Falha antes do commit não persiste efeito; após commit, estado/evento/checkpoint reaparecem; reserva órfã fica `blocked` com evento único; duas recuperações não duplicam eventos; corrupção/divergência bloqueia mutação e preserva dados. |
+| F2-09 | Integrar validação e inspeção seguras na CLI, documentar versionamento seletivo e operação local. | F2-08 | CLI expõe somente leitura/inspeção aprovadas e erros estáveis; `init` e `doctor` da Fase 1 mantêm comportamento; Git versiona só `spec.toml` e `tasks.toml`; nenhum comando executa agentes, Docker ou Git mutável. |
+| F2-10 | Completar testes unitários, de contrato, integração, migração, concorrência, reabertura e documentação de limite. | F2-02 a F2-09 | Suíte passa em Python 3.11, 3.12 e 3.13 sem Codex/Docker; cobre disputa entre processos, FKs, ciclos, mudanças de definição, evidência, idempotência, falha de migração/backup, interrupção e preservação do ADR. |
+
+### Matriz mínima de verificação
+
+| Camada | Cenários obrigatórios |
+| --- | --- |
+| Contratos TOML | Versão desconhecida/futura, encoding, chave/tipo incorretos, critérios vazios, IDs estáveis, digest canônico, arquivo malformado, evolução sem edição implícita. |
+| Grafo | Referência ausente, duplicata, ciclo direto/indireto, ordem topológica determinística, desbloqueio com múltiplos pré-requisitos. |
+| Estado | Transições permitidas/proibidas, revisão esperada, evidência declarada/verificada por critério, ID+digest divergente, eventos/checkpoints atômicos, FKs e rollback. |
+| Migração | Banco vazio, reabertura, versão futura, falha de migração e backup, WAL ativo, timeout e durabilidade explícitos, integridade após interrupção. |
+| Recuperação | Interrupção antes/depois do commit, reserva órfã bloqueada uma vez, reabertura repetida, definição alterada, banco corrompido em modo somente leitura. |
+| Integração | CLI somente leitura onde prometido, apenas dois TOML versionáveis, dados operacionais fora do Git, ausência de Codex/Docker, protótipo ADR intacto. |
+
+### Gate e riscos
+
+Gate da Fase 2: contratos v1 documentados e testados; DAG válido; SQLite transacional com migrações reversíveis por falha, FKs e auditoria; recuperação determinística e idempotente; CI verde nas três versões; nenhuma execução de agentes. A Fase 3 só começa após revisão e autorização separadas.
+
+Decisões consolidadas: somente `spec.toml` e `tasks.toml` versionáveis; revisões iniciadas imutáveis com revalidação explícita; evidência estruturada declarada/verificada por critério; reserva órfã bloqueada para reconciliação; SQLite em WAL com FKs, timeout, `synchronous=FULL`, migrações transacionais e backup consistente; `operation_id` global com digest de solicitação. F2-01 registra parâmetros concretos em ADR antes do código.
+
+Riscos residuais: identidade confiável do proprietário de reserva e autoria de verificação; custo de I/O de durabilidade e backup; conflito quando TOML muda entre leitura e commit; restauração manual após corrupção física; compatibilidade de futuros esquemas TOML/SQLite. Migração do JSON do ADR, checkpoints Git, isolamento Docker e validação automática ficam fora da Fase 2.
