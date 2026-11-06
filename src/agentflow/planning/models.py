@@ -7,6 +7,7 @@ from dataclasses import dataclass
 class Criterion:
     id: str
     description: str
+    satisfies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,3 +82,4 @@ class Plan:
     spec_schema_version: int = 1
     tasks_schema_version: int = 1
     gate_order: tuple[str, ...] = ()
+    deferred_requirements: tuple[Criterion, ...] = ()

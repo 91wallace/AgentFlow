@@ -126,17 +126,71 @@ AGENT_SCHEMA = (
     "CREATE TRIGGER agent_model_observation_no_delete BEFORE DELETE ON agent_model_observations BEGIN SELECT RAISE(ABORT,'agent model observation is immutable'); END",
 )
 
+SDD_SCHEMA = (
+    "CREATE TABLE specification_revisions(revision_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence INTEGER NOT NULL, schema_version INTEGER NOT NULL, snapshot_json TEXT NOT NULL, spec_digest TEXT NOT NULL, parent_revision_id TEXT, status TEXT NOT NULL CHECK(status IN ('proposed','accepted','rejected','superseded')), operation_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, UNIQUE(project_id,sequence), FOREIGN KEY(project_id) REFERENCES projects(project_id), FOREIGN KEY(parent_revision_id) REFERENCES specification_revisions(revision_id))",
+    "CREATE TABLE plan_revisions(plan_revision_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence INTEGER NOT NULL, specification_revision_id TEXT NOT NULL, spec_digest TEXT NOT NULL, tasks_digest TEXT NOT NULL, snapshot_json TEXT NOT NULL, trace_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('proposed','accepted','rejected','superseded','legacy_unmapped')), operation_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, UNIQUE(project_id,sequence), FOREIGN KEY(project_id) REFERENCES projects(project_id), FOREIGN KEY(specification_revision_id) REFERENCES specification_revisions(revision_id))",
+    "CREATE TABLE change_impacts(impact_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, source_plan_revision_id TEXT, target_plan_revision_id TEXT NOT NULL, inventory_json TEXT NOT NULL, impact_json TEXT NOT NULL, impact_digest TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(project_id), FOREIGN KEY(source_plan_revision_id) REFERENCES plan_revisions(plan_revision_id), FOREIGN KEY(target_plan_revision_id) REFERENCES plan_revisions(plan_revision_id))",
+    "CREATE TABLE sdd_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, kind TEXT NOT NULL, subject_id TEXT NOT NULL, payload_json TEXT NOT NULL, occurred_at TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE, FOREIGN KEY(project_id) REFERENCES projects(project_id))",
+    "CREATE TABLE model_catalog_snapshots(catalog_digest TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, snapshot_json TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE routing_decisions(decision_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL, task_id TEXT NOT NULL, classification_json TEXT NOT NULL, catalog_digest TEXT NOT NULL, policy_digest TEXT NOT NULL, policy_snapshot_json TEXT NOT NULL, decision_json TEXT NOT NULL, decision_digest TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(project_id), FOREIGN KEY(plan_revision_id) REFERENCES plan_revisions(plan_revision_id), FOREIGN KEY(catalog_digest) REFERENCES model_catalog_snapshots(catalog_digest))",
+    "CREATE TRIGGER specification_revision_no_update BEFORE UPDATE ON specification_revisions BEGIN SELECT RAISE(ABORT,'specification revision is immutable'); END",
+    "CREATE TRIGGER specification_revision_no_delete BEFORE DELETE ON specification_revisions BEGIN SELECT RAISE(ABORT,'specification revision is immutable'); END",
+    "CREATE TRIGGER plan_revision_no_update BEFORE UPDATE ON plan_revisions BEGIN SELECT RAISE(ABORT,'plan revision is immutable'); END",
+    "CREATE TRIGGER plan_revision_no_delete BEFORE DELETE ON plan_revisions BEGIN SELECT RAISE(ABORT,'plan revision is immutable'); END",
+    "CREATE TRIGGER change_impact_no_update BEFORE UPDATE ON change_impacts BEGIN SELECT RAISE(ABORT,'change impact is immutable'); END",
+    "CREATE TRIGGER change_impact_no_delete BEFORE DELETE ON change_impacts BEGIN SELECT RAISE(ABORT,'change impact is immutable'); END",
+    "CREATE TRIGGER model_catalog_no_update BEFORE UPDATE ON model_catalog_snapshots BEGIN SELECT RAISE(ABORT,'model catalog is immutable'); END",
+    "CREATE TRIGGER model_catalog_no_delete BEFORE DELETE ON model_catalog_snapshots BEGIN SELECT RAISE(ABORT,'model catalog is immutable'); END",
+    "CREATE TRIGGER routing_decision_no_update BEFORE UPDATE ON routing_decisions BEGIN SELECT RAISE(ABORT,'routing decision is immutable'); END",
+    "CREATE TRIGGER routing_decision_no_delete BEFORE DELETE ON routing_decisions BEGIN SELECT RAISE(ABORT,'routing decision is immutable'); END",
+    "CREATE TRIGGER sdd_event_no_update BEFORE UPDATE ON sdd_events BEGIN SELECT RAISE(ABORT,'sdd event is append-only'); END",
+    "CREATE TRIGGER sdd_event_no_delete BEFORE DELETE ON sdd_events BEGIN SELECT RAISE(ABORT,'sdd event is append-only'); END",
+)
+
+BUDGET_SCHEMA = (
+    "ALTER TABLE routing_decisions ADD COLUMN specification_digest TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE routing_decisions ADD COLUMN specification_snapshot_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE routing_decisions ADD COLUMN budget_snapshot_json TEXT NOT NULL DEFAULT '{}'",
+    "CREATE TABLE budget_accounts(account_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, scope_type TEXT NOT NULL CHECK(scope_type IN ('execution','task','attempt')), scope_id TEXT NOT NULL, currency TEXT NOT NULL CHECK(length(currency)=3), cost_limit TEXT, token_limit INTEGER, time_limit_seconds INTEGER, cost_status TEXT NOT NULL CHECK(cost_status IN ('applied_verified','estimated','unavailable')), token_status TEXT NOT NULL CHECK(token_status IN ('applied_verified','estimated','unavailable')), time_status TEXT NOT NULL CHECK(time_status IN ('applied_verified','estimated','unavailable')), snapshot_json TEXT NOT NULL, snapshot_digest TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(project_id))",
+    "CREATE TABLE budget_reservations(reservation_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL, project_id TEXT NOT NULL, task_id TEXT NOT NULL, attempt_id TEXT, execution_id TEXT NOT NULL, currency TEXT NOT NULL, cost_reserved TEXT NOT NULL, tokens_reserved INTEGER NOT NULL, seconds_reserved INTEGER NOT NULL, cost_state TEXT NOT NULL CHECK(cost_state IN ('known','estimated','unknown')), tokens_state TEXT NOT NULL CHECK(tokens_state IN ('known','estimated','unknown')), time_state TEXT NOT NULL CHECK(time_state IN ('known','estimated','unknown')), status TEXT NOT NULL CHECK(status IN ('reserved','unknown','reconciled')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(project_id,task_id) REFERENCES tasks(project_id,task_id), FOREIGN KEY(attempt_id) REFERENCES execution_attempts(attempt_id))",
+    "CREATE TABLE budget_reservation_accounts(reservation_id TEXT NOT NULL, account_id TEXT NOT NULL, cost_held TEXT NOT NULL, tokens_held INTEGER NOT NULL, seconds_held INTEGER NOT NULL, PRIMARY KEY(reservation_id,account_id), FOREIGN KEY(reservation_id) REFERENCES budget_reservations(reservation_id), FOREIGN KEY(account_id) REFERENCES budget_accounts(account_id))",
+    "CREATE TABLE budget_ledger(event_id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, request_digest TEXT NOT NULL, reservation_id TEXT NOT NULL, account_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('reserved','reconciled','recovered_unknown')), cost_delta TEXT NOT NULL, tokens_delta INTEGER NOT NULL, seconds_delta INTEGER NOT NULL, payload_json TEXT NOT NULL CHECK(length(CAST(payload_json AS BLOB))<=8192), occurred_at TEXT NOT NULL, UNIQUE(operation_id,account_id,kind), FOREIGN KEY(reservation_id) REFERENCES budget_reservations(reservation_id), FOREIGN KEY(account_id) REFERENCES budget_accounts(account_id))",
+    "CREATE TABLE budget_reconciliations(operation_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, reservation_id TEXT NOT NULL, cost_actual TEXT, tokens_actual INTEGER, seconds_actual INTEGER, cost_state TEXT NOT NULL CHECK(cost_state IN ('known','estimated','unknown')), tokens_state TEXT NOT NULL CHECK(tokens_state IN ('known','estimated','unknown')), time_state TEXT NOT NULL CHECK(time_state IN ('known','estimated','unknown')), source TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(reservation_id) REFERENCES budget_reservations(reservation_id))",
+    "CREATE TABLE escalation_proposals(proposal_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL, project_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL, task_id TEXT NOT NULL, source_attempt_id TEXT NOT NULL, source_provider_id TEXT NOT NULL, source_model_id TEXT NOT NULL, target_provider_id TEXT NOT NULL, target_model_id TEXT NOT NULL, evidence_ids_json TEXT NOT NULL, evidence_digest TEXT NOT NULL, reason_code TEXT NOT NULL CHECK(reason_code='verified_validation_gate_failure'), currency TEXT NOT NULL, source_cost_estimate TEXT NOT NULL, target_cost_estimate TEXT NOT NULL, cost_delta_estimate TEXT NOT NULL, budget_status TEXT NOT NULL CHECK(budget_status IN ('estimated','unavailable')), authorization_required INTEGER NOT NULL CHECK(authorization_required=1), expires_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('proposed','expired','blocked')), created_at TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(project_id), FOREIGN KEY(plan_revision_id) REFERENCES plan_revisions(plan_revision_id), FOREIGN KEY(source_attempt_id) REFERENCES execution_attempts(attempt_id))",
+    "CREATE TABLE budget_operations(operation_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, operation_kind TEXT NOT NULL CHECK(operation_kind IN ('account','reserve','reconcile','recovery')), result_json TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TRIGGER budget_operation_no_update BEFORE UPDATE ON budget_operations BEGIN SELECT RAISE(ABORT,'budget operations are immutable'); END",
+    "CREATE TRIGGER budget_operation_no_delete BEFORE DELETE ON budget_operations BEGIN SELECT RAISE(ABORT,'budget operations are immutable'); END",
+    "CREATE TRIGGER budget_operation_global_guard BEFORE INSERT ON budget_operations WHEN EXISTS(SELECT 1 FROM operations WHERE operation_id=NEW.operation_id) OR EXISTS(SELECT 1 FROM execution_attempts WHERE operation_id=NEW.operation_id) OR EXISTS(SELECT 1 FROM git_operations WHERE operation_id=NEW.operation_id) OR EXISTS(SELECT 1 FROM validation_operations WHERE operation_id=NEW.operation_id) OR EXISTS(SELECT 1 FROM sdd_events WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'operation_id already used outside budget ledger'); END",
+    "CREATE TRIGGER f2_operation_budget_guard BEFORE INSERT ON operations WHEN EXISTS(SELECT 1 FROM budget_operations WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'operation_id already used by budget ledger'); END",
+    "CREATE TRIGGER f3_operation_budget_guard BEFORE INSERT ON execution_attempts WHEN EXISTS(SELECT 1 FROM budget_operations WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'operation_id already used by budget ledger'); END",
+    "CREATE TRIGGER f4_operation_budget_guard BEFORE INSERT ON git_operations WHEN EXISTS(SELECT 1 FROM budget_operations WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'operation_id already used by budget ledger'); END",
+    "CREATE TRIGGER f5_operation_budget_guard BEFORE INSERT ON validation_operations WHEN EXISTS(SELECT 1 FROM budget_operations WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'operation_id already used by budget ledger'); END",
+    "CREATE TRIGGER sdd_operation_budget_guard BEFORE INSERT ON sdd_events WHEN EXISTS(SELECT 1 FROM budget_operations WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'operation_id already used by budget ledger'); END",
+    "CREATE TRIGGER budget_account_no_update BEFORE UPDATE ON budget_accounts BEGIN SELECT RAISE(ABORT,'budget account snapshots are immutable'); END",
+    "CREATE TRIGGER budget_account_no_delete BEFORE DELETE ON budget_accounts BEGIN SELECT RAISE(ABORT,'budget account snapshots are immutable'); END",
+    "CREATE TRIGGER budget_ledger_no_update BEFORE UPDATE ON budget_ledger BEGIN SELECT RAISE(ABORT,'budget ledger is append-only'); END",
+    "CREATE TRIGGER budget_ledger_no_delete BEFORE DELETE ON budget_ledger BEGIN SELECT RAISE(ABORT,'budget ledger is append-only'); END",
+    "CREATE TRIGGER budget_reconciliation_no_update BEFORE UPDATE ON budget_reconciliations BEGIN SELECT RAISE(ABORT,'budget reconciliation is immutable'); END",
+    "CREATE TRIGGER budget_reconciliation_no_delete BEFORE DELETE ON budget_reconciliations BEGIN SELECT RAISE(ABORT,'budget reconciliation is immutable'); END",
+    "CREATE TRIGGER escalation_proposal_no_update BEFORE UPDATE ON escalation_proposals BEGIN SELECT RAISE(ABORT,'escalation proposal is immutable'); END",
+    "CREATE TRIGGER escalation_proposal_no_delete BEFORE DELETE ON escalation_proposals BEGIN SELECT RAISE(ABORT,'escalation proposal is immutable'); END",
+    "CREATE INDEX budget_ledger_by_account ON budget_ledger(account_id,event_id)",
+    "CREATE INDEX budget_reservations_by_attempt ON budget_reservations(attempt_id,status)",
+    "CREATE INDEX escalation_by_expiry ON escalation_proposals(status,expires_at)",
+)
+
 from .validation_schema import VALIDATION_SCHEMA
 
 
 class SQLiteStore:
     def __init__(self, path: Path, *, execution: bool = False, git: bool = False,
-                 validation: bool = False, agent_models: bool = False):
+                 validation: bool = False, agent_models: bool = False, sdd: bool = False):
         self.path = path
         self.execution = execution
         self.git = git
         self.validation = validation
         self.agent_models = agent_models
+        self.sdd = sdd
         if validation and not (execution and git):
             raise IntegrityError("validação exige esquemas de execução e Git")
         self.existed = path.exists()
@@ -145,7 +199,7 @@ class SQLiteStore:
         try:
             self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            supported = 5 if execution or git or validation or agent_models else 3
+            supported = 7 if (sdd or execution or git or validation or agent_models) else 3
             if version > supported:
                 raise IntegrityError(f"versão SQLite futura: {version}")
             self.db.execute("PRAGMA busy_timeout=5000")
@@ -203,8 +257,8 @@ class SQLiteStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        target = 5 if self.agent_models else (4 if self.validation else (3 if self.git else (2 if self.execution else 1)))
-        supported_max = 5 if self.execution or self.git or self.validation or self.agent_models else 3
+        target = 7 if self.sdd else (5 if self.agent_models else (4 if self.validation else (3 if self.git else (2 if self.execution else 1))))
+        supported_max = 7 if (self.sdd or self.execution or self.git or self.validation or self.agent_models) else 3
         if version > supported_max:
             raise IntegrityError(f"versão SQLite futura: {version}")
         if version:
@@ -234,7 +288,9 @@ class SQLiteStore:
             self._backup()
             statements = (EXECUTION_SCHEMA if next_version == 2 else GIT_SCHEMA
                           if next_version == 3 else VALIDATION_SCHEMA
-                          if next_version == 4 else AGENT_SCHEMA)
+                          if next_version == 4 else AGENT_SCHEMA
+                          if next_version == 5 else SDD_SCHEMA
+                          if next_version == 6 else BUDGET_SCHEMA)
             try:
                 with self.transaction() as db:
                     for statement in statements:

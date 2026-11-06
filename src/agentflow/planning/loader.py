@@ -34,8 +34,14 @@ def digest(value: object) -> str:
 
 def task_data(task: Task) -> dict:
     """Stable task payload; empty F4/F5 fields preserve old plan digests."""
+    criteria = []
+    for item in task.acceptance_criteria:
+        criterion = {"id": item.id, "description": item.description}
+        if item.satisfies:
+            criterion["satisfies"] = list(item.satisfies)
+        criteria.append(criterion)
     data = {"id": task.id, "title": task.title, "description": task.description,
-            "acceptance_criteria": [asdict(item) for item in task.acceptance_criteria],
+            "acceptance_criteria": criteria,
             "depends_on": list(task.depends_on)}
     if task.versioned_paths:
         data["versioned_paths"] = list(task.versioned_paths)
@@ -56,7 +62,8 @@ def specification_data(specification: Specification) -> dict:
     """Preserve the F2 digest when the v1 allowlist is semantically empty."""
     data = {"project_id": specification.project_id, "title": specification.title,
             "objective": specification.objective,
-            "acceptance_criteria": [asdict(item) for item in specification.acceptance_criteria]}
+            "acceptance_criteria": [{"id": item.id, "description": item.description}
+                                    for item in specification.acceptance_criteria]}
     if specification.validation_commands:
         data["validation_commands"] = [command_data(item)
                                        for item in specification.validation_commands]
@@ -100,7 +107,7 @@ def _read(path: Path, allowed: set[str], required: set[str]) -> tuple[dict, int]
     if path.name == "spec.toml":
         versions = (1, 2)
     else:
-        versions = (1, 2, 3)
+        versions = (1, 2, 3, 4)
     version = table["schema_version"]
     if type(version) is not int or version not in versions:
         message = "versão 1 ou 2 exigida" if path.name == "spec.toml" else f"versões suportadas: {', '.join(map(str, versions))}"
@@ -108,19 +115,27 @@ def _read(path: Path, allowed: set[str], required: set[str]) -> tuple[dict, int]
     return table, version
 
 
-def _criteria(value: object, where: str) -> tuple[Criterion, ...]:
+def _criteria(value: object, where: str, *, task_criteria: bool = False) -> tuple[Criterion, ...]:
     if not isinstance(value, list) or not value:
         raise PlanError(f"{where}: lista não vazia esperada")
     seen: set[str] = set()
     items = []
     for index, raw in enumerate(value):
         place = f"{where}[{index}]"
-        data = _table(raw, {"id", "description"}, {"id", "description"}, place)
+        allowed = {"id", "description", "satisfies"} if task_criteria else {"id", "description"}
+        data = _table(raw, allowed, {"id", "description"}, place)
         name = _text(data["id"], f"{place}.id", True)
         if name in seen:
             raise PlanError(f"{place}.id: duplicado: {name}")
         seen.add(name)
-        items.append(Criterion(name, _text(data["description"], f"{place}.description")))
+        satisfies = data.get("satisfies", [])
+        if not isinstance(satisfies, list) or any(type(ref) is not str or not ID.fullmatch(ref) for ref in satisfies):
+            raise PlanError(f"{place}.satisfies: lista de IDs esperada")
+        if len(satisfies) != len(set(satisfies)):
+            raise PlanError(f"{place}.satisfies: referência duplicada")
+        if satisfies and not task_criteria:
+            raise PlanError(f"{place}.satisfies: permitido somente em critérios de tarefa")
+        items.append(Criterion(name, _text(data["description"], f"{place}.description"), tuple(sorted(satisfies))))
     return tuple(sorted(items, key=lambda item: item.id))
 
 
@@ -281,7 +296,22 @@ def _versioned_paths(value: object, where: str) -> tuple[str, ...]:
 
 
 def load_tasks(path: Path) -> tuple[Task, ...]:
-    data, schema_version = _read(path, {"tasks"}, {"tasks"})
+    data, schema_version = _read(path, {"tasks", "deferred_requirements"}, {"tasks"})
+    if schema_version < 4 and "deferred_requirements" in data:
+        raise PlanError(f"{path}.deferred_requirements: exige schema_version=4")
+    deferred_raw = data.get("deferred_requirements", [])
+    if not isinstance(deferred_raw, list):
+        raise PlanError(f"{path}.deferred_requirements: lista esperada")
+    deferred = []
+    deferred_ids = set()
+    for index, raw in enumerate(deferred_raw):
+        place = f"{path}.deferred_requirements[{index}]"
+        item = _table(raw, {"id", "rationale"}, {"id", "rationale"}, place)
+        requirement_id = _text(item["id"], f"{place}.id", True)
+        if requirement_id in deferred_ids:
+            raise PlanError(f"{place}.id: adiamento duplicado")
+        deferred_ids.add(requirement_id)
+        deferred.append(Criterion(requirement_id, _text(item["rationale"], f"{place}.rationale")))
     if not isinstance(data["tasks"], list) or not data["tasks"]:
         raise PlanError(f"{path}.tasks: lista não vazia esperada")
     tasks = []
@@ -296,13 +326,13 @@ def load_tasks(path: Path) -> tuple[Task, ...]:
             raise PlanError(f"{place}.versioned_paths: obrigatório no schema v{schema_version} (use lista vazia para tarefa sem escrita versionada)")
         if schema_version < 3 and "gates" in item:
             raise PlanError(f"{place}.gates: exige schema_version=3")
-        if schema_version == 3 and "gates" not in item:
-            raise PlanError(f"{place}.gates: obrigatório no schema v3 (use lista vazia se não houver gates)")
+        if schema_version >= 3 and "gates" not in item:
+            raise PlanError(f"{place}.gates: obrigatório no schema v{schema_version} (use lista vazia se não houver gates)")
         name = _text(item["id"], f"{place}.id", True)
         if name in seen:
             raise PlanError(f"{place}.id: duplicado: {name}")
         seen.add(name)
-        criteria = _criteria(item["acceptance_criteria"], f"{place}.acceptance_criteria")
+        criteria = _criteria(item["acceptance_criteria"], f"{place}.acceptance_criteria", task_criteria=schema_version >= 4)
         deps = item.get("depends_on", [])
         if not isinstance(deps, list) or any(type(dep) is not str or not ID.fullmatch(dep) for dep in deps):
             raise PlanError(f"{place}.depends_on: lista de IDs esperada")
@@ -317,7 +347,24 @@ def load_tasks(path: Path) -> tuple[Task, ...]:
                           _text(item["description"], f"{place}.description"), criteria,
                           tuple(sorted(deps)), _versioned_paths(item.get("versioned_paths", []),
                                                                f"{place}.versioned_paths"), gates))
-    return tuple(sorted(tasks, key=lambda task: task.id))
+    result = tuple(sorted(tasks, key=lambda task: task.id))
+    if schema_version >= 4:
+        requirement_ids = {criterion.id for criterion in load_spec(path.parent / "spec.toml").acceptance_criteria}
+        mapped: dict[str, int] = {}
+        for task in result:
+            for criterion in task.acceptance_criteria:
+                for requirement_id in criterion.satisfies:
+                    if requirement_id not in requirement_ids:
+                        raise PlanError(f"tasks.{task.id}.{criterion.id}.satisfies: requisito inexistente: {requirement_id}")
+                    mapped[requirement_id] = mapped.get(requirement_id, 0) + 1
+        if deferred_ids - requirement_ids:
+            raise PlanError(f"deferred_requirements: requisito inexistente: {', '.join(sorted(deferred_ids - requirement_ids))}")
+        if deferred_ids & mapped.keys():
+            raise PlanError("requisito não pode estar mapeado e adiado")
+        uncovered = requirement_ids - mapped.keys() - deferred_ids
+        if uncovered:
+            raise PlanError(f"requisitos sem rastreabilidade nem adiamento: {', '.join(sorted(uncovered))}")
+    return result
 
 
 def task_order(tasks: tuple[Task, ...]) -> tuple[str, ...]:
@@ -389,9 +436,24 @@ def load_plan(directory: Path) -> Plan:
             if gate.command_id not in all_commands:
                 raise PlanError(f"tasks.{task.id}.gates.{gate.gate_id}.command_id: não está na allowlist do projeto: {gate.command_id}")
     gates = gate_order(tasks)
+    task_payload = [task_data(task) for task in tasks]
+    tasks_digest = (digest({"tasks": task_payload,
+                            "deferred_requirements": [{"id": item.id, "rationale": item.description}
+                                                       for item in _load_deferred(tasks_path)]})
+                    if _read(tasks_path, {"tasks", "deferred_requirements"}, {"tasks"})[1] >= 4
+                    else digest(task_payload))
     return Plan(specification, tasks, order,
                 digest(specification_data(specification)),
-                digest([task_data(task) for task in tasks]),
+                tasks_digest,
                 specification.schema_version,
-                _read(tasks_path, {"tasks"}, {"tasks"})[1],
-                gates)
+                _read(tasks_path, {"tasks", "deferred_requirements"}, {"tasks"})[1],
+                gates,
+                _load_deferred(tasks_path))
+
+
+def _load_deferred(path: Path) -> tuple[Criterion, ...]:
+    data, version = _read(path, {"tasks", "deferred_requirements"}, {"tasks"})
+    if version < 4:
+        return ()
+    return tuple(sorted((Criterion(item["id"], item["rationale"])
+                         for item in data.get("deferred_requirements", [])), key=lambda item: item.id))

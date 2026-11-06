@@ -22,7 +22,7 @@ from agentflow.validation import (CapabilityState, GateStatus, RuntimeCapabiliti
 from test_git_workspace import git, make_repo
 
 
-def make_validation_project(tmp_path, gates=None):
+def make_validation_project(tmp_path, gates=None, *, tasks_schema=3):
     gates = gates or [
         {"id": "gate-a", "dependencies": []},
         {"id": "gate-b", "dependencies": ["gate-a"]},
@@ -41,7 +41,7 @@ description = "Specification is ready"
 [validation]
 commands = [{ id = "check", platform = "%s", executable = %s, sha256 = "%s", arguments = ["--version"], working_directory = "snapshot", version = "test" }]
 ''' % ("windows" if os.name == "nt" else "linux", json.dumps(executable), executable_digest)
-    task_text = '''schema_version = 3
+    task_text = f'''schema_version = {tasks_schema}
 [[tasks]]
 id = "task-one"
 title = "Task one"
@@ -51,6 +51,8 @@ versioned_paths = ["answer.txt"]
 id = "works"
 description = "The validated task works"
 '''
+    if tasks_schema >= 4:
+        task_text += 'satisfies = ["spec-ready"]\n'
     for gate in gates:
         task_text += f'''[[tasks.gates]]
 id = "{gate["id"]}"
@@ -87,7 +89,7 @@ required = {str(gate.get("required", True)).lower()}
 
 
 def request_for(plan, store, workspace, checkpoint, *, operation="validation-op-1",
-                run_id="run-validation-1", allow_unconfined_network=False):
+                run_id="run-validation-1", allow_unconfined_network=False, attempt_id=None):
     task = plan.tasks[0]
     selected = set(gate.gate_id for gate in task.gates)
     gates = [gate for gate_id in plan.gate_order if gate_id in selected
@@ -120,6 +122,7 @@ def request_for(plan, store, workspace, checkpoint, *, operation="validation-op-
         policy, policy_digest, tuple(gate.gate_id for gate in gates),
         RuntimeProfile.LOCAL_EXPLICIT,
         allow_unconfined_network,
+        attempt_id=attempt_id,
     )
 
 
