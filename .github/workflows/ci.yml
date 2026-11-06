@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -14,12 +17,86 @@ jobs:
         python-version: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install package and test dependencies
-        run: python -m pip install '.[test]'
-      - name: Test
-        run: python -m pytest -q
-      - name: CLI smoke test
-        run: agentflow --version
+      - name: Create clean virtual environment
+        shell: bash
+        run: python -m venv .ci-venv
+      - name: Build wheel with PEP 517 isolation
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then VENV_PY=".ci-venv/Scripts/python.exe"; else VENV_PY=".ci-venv/bin/python"; fi
+          "$VENV_PY" -m pip wheel --no-deps --wheel-dir .ci-wheelhouse .
+          "$VENV_PY" - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path('.ci-wheelhouse').glob('agentflow-*.whl'))
+          assert len(wheels) == 1, f'expected one AgentFlow wheel, found {wheels}'
+          with ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+          required = {
+              'agentflow/agents/routing.py',
+              'agentflow/approval/__init__.py',
+              'agentflow/approval/broker.py',
+              'agentflow/state/audit.py',
+              'agentflow/state/budgets.py',
+              'agentflow/state/sdd.py',
+          }
+          missing = required - names
+          assert not missing, f'F7 modules missing from wheel: {sorted(missing)}'
+          PY
+      - name: Install wheel and test dependencies in clean environment
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then VENV_PY=".ci-venv/Scripts/python.exe"; else VENV_PY=".ci-venv/bin/python"; fi
+          "$VENV_PY" -m pip install '.[test]'
+          "$VENV_PY" -m pip check
+          "$VENV_PY" - <<'PY'
+          import agentflow
+          from importlib.metadata import distribution
+          from pathlib import Path
+
+          module_path = Path(agentflow.__file__).resolve()
+          assert 'site-packages' in str(module_path).lower(), module_path
+          dist_files = {str(item).replace('\\', '/') for item in distribution('agentflow').files or ()}
+          required = {
+              'agentflow/agents/routing.py',
+              'agentflow/approval/broker.py',
+              'agentflow/state/audit.py',
+              'agentflow/state/budgets.py',
+              'agentflow/state/sdd.py',
+          }
+          assert required <= dist_files, f'installed package missing F7 modules: {sorted(required - dist_files)}'
+          scripts = {item.name for item in distribution('agentflow').entry_points if item.group == 'console_scripts'}
+          assert 'agentflow' in scripts, f'CLI entry point missing: {scripts}'
+          PY
+      - name: Test complete suite against clean package environment
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then VENV_PY=".ci-venv/Scripts/python.exe"; else VENV_PY=".ci-venv/bin/python"; fi
+          "$VENV_PY" -m pytest -q
+      - name: Test editable installation
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then VENV_PY=".ci-venv/Scripts/python.exe"; else VENV_PY=".ci-venv/bin/python"; fi
+          "$VENV_PY" -m pip install --no-deps -e .
+          "$VENV_PY" -c "import agentflow; from pathlib import Path; assert Path(agentflow.__file__).resolve().is_relative_to(Path('src').resolve()), agentflow.__file__"
+          "$VENV_PY" -m pip check
+      - name: CLI smoke tests
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then CLI=".ci-venv/Scripts/agentflow.exe"; else CLI=".ci-venv/bin/agentflow"; fi
+          "$CLI" --version
+          "$CLI" audit --help
+      - name: Check pull request diff whitespace
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+      - name: Check pushed commit diff whitespace
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        shell: bash
+        run: git diff --check "${{ github.event.before }}...${{ github.sha }}"

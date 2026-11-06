@@ -102,6 +102,27 @@ class ModelDescriptor:
         return current - observed > timedelta(seconds=max_age_seconds)
 
 
+@dataclass(frozen=True)
+class ModelCatalogEntry:
+    """Catalog envelope separating declared capabilities from verified evidence."""
+
+    descriptor: ModelDescriptor
+    verified_capabilities: tuple[str, ...] = ()
+    verification_source: str = ""
+
+    def __post_init__(self) -> None:
+        if len(set(self.verified_capabilities)) != len(self.verified_capabilities):
+            raise ExecutionError("duplicate verified model capability")
+        if not set(self.verified_capabilities) <= set(self.descriptor.capabilities):
+            raise ExecutionError("verified capability is absent from the descriptor")
+        if self.verified_capabilities and not self.verification_source.strip():
+            raise ExecutionError("verified capabilities require provenance")
+
+    @property
+    def unknown_capabilities(self) -> tuple[str, ...]:
+        return tuple(sorted(set(self.descriptor.capabilities) - set(self.verified_capabilities)))
+
+
 def _timestamp(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
