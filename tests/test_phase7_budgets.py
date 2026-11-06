@@ -165,5 +165,3 @@ def test_reservation_can_be_scoped_to_prepared_attempt_without_spawning(tmp_path
             account_ids=("execution-account", "task-account", "attempt-account"),
             estimate=estimate("0.10", 20, 5))
         assert result.status == "reserved"
-
-\n
