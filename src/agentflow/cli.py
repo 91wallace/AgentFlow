@@ -3,6 +3,7 @@
 import argparse
 from dataclasses import asdict
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -27,6 +28,7 @@ from .core.git import GitCoordinator
 from .state.git import GitStateStore
 from .state.contracts import Transition
 from .state.validation import ValidationStateStore
+from .state.audit import inspect_phase7_database
 from .validation import (DockerRuntime, LocalProcessRuntime, RuntimeLimits,
                          RuntimeProfile, SnapshotManager, ValidationRequest,
                          ValidationScheduler, policy_snapshot,
@@ -45,9 +47,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentflow")
     parser.add_argument("--version", action="version", version=f"agentflow {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "doctor", "plan", "state", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup"):
+    for name in ("init", "doctor", "plan", "state", "audit", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup"):
         command = commands.add_parser(name)
         command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
+        if name == "audit":
+            command.add_argument("--format", choices=("human", "json"), default="human")
         if name == "execute":
             command.add_argument("--task", required=True)
             command.add_argument("--operation-id", required=True)
@@ -88,6 +92,38 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{root}: configuração {'criada' if created else 'existente; sem alterações'}")
             return 0
         root = repository_root(args.path.resolve())
+        if args.command == "audit":
+            report = inspect_phase7_database(root / ".agentflow" / "state.sqlite3")
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                labels = {
+                    "specification_revisions": "Specification revisions",
+                    "plan_revisions": "Plan revisions",
+                    "requirement_coverage": "Requirement coverage",
+                    "change_impacts": "Change impacts",
+                    "catalog": "Model catalog",
+                    "routing_decisions": "Routing decisions (preview only)",
+                    "budget_accounts": "Budget accounts",
+                    "budget_reservations": "Budget reservations",
+                    "budget_ledger": "Budget usage ledger",
+                    "escalation_proposals": "Escalation proposals (not dispatched)",
+                    "task_states": "Task states",
+                    "evidence_links": "Evidence and checkpoint links",
+                    "audit_events": "Audit events",
+                    "unknowns_and_pending": "Unknowns and pending work",
+                    "unavailable_sections": "Unavailable schema sections",
+                }
+                print(f"SQLite schema v{report['schema_version']}; integrity={report['integrity']['integrity_check']}; "
+                      f"foreign-key violations={report['integrity']['foreign_key_violations']}")
+                for key, label in labels.items():
+                    print(f"\n{label}:")
+                    rows = report[key]
+                    if not rows:
+                        print("  (none)")
+                    for item in rows:
+                        print("  " + json.dumps(item, ensure_ascii=False, sort_keys=True))
+            return 0
         if args.command == "plan":
             plan = load_plan(root / ".agentflow")
             print(f"{plan.specification.project_id}: {len(plan.tasks)} tarefas; ordem: {', '.join(plan.order)}")
