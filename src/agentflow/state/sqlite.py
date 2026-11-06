@@ -117,16 +117,26 @@ GIT_SCHEMA = (
     "CREATE INDEX git_events_by_operation ON git_events(operation_id,event_id)",
 )
 
+AGENT_SCHEMA = (
+    "CREATE TABLE agent_model_selections(attempt_id TEXT PRIMARY KEY, snapshot_json TEXT NOT NULL, snapshot_digest TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(attempt_id) REFERENCES execution_attempts(attempt_id))",
+    "CREATE TABLE agent_model_observations(attempt_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('confirmed','unknown','mismatch')), source TEXT NOT NULL, observed_at TEXT NOT NULL, FOREIGN KEY(attempt_id) REFERENCES agent_model_selections(attempt_id))",
+    "CREATE TRIGGER agent_model_selection_no_update BEFORE UPDATE ON agent_model_selections BEGIN SELECT RAISE(ABORT,'agent model selection is immutable'); END",
+    "CREATE TRIGGER agent_model_selection_no_delete BEFORE DELETE ON agent_model_selections BEGIN SELECT RAISE(ABORT,'agent model selection is immutable'); END",
+    "CREATE TRIGGER agent_model_observation_no_update BEFORE UPDATE ON agent_model_observations BEGIN SELECT RAISE(ABORT,'agent model observation is immutable'); END",
+    "CREATE TRIGGER agent_model_observation_no_delete BEFORE DELETE ON agent_model_observations BEGIN SELECT RAISE(ABORT,'agent model observation is immutable'); END",
+)
+
 from .validation_schema import VALIDATION_SCHEMA
 
 
 class SQLiteStore:
     def __init__(self, path: Path, *, execution: bool = False, git: bool = False,
-                 validation: bool = False):
+                 validation: bool = False, agent_models: bool = False):
         self.path = path
         self.execution = execution
         self.git = git
         self.validation = validation
+        self.agent_models = agent_models
         if validation and not (execution and git):
             raise IntegrityError("validação exige esquemas de execução e Git")
         self.existed = path.exists()
@@ -135,7 +145,8 @@ class SQLiteStore:
         try:
             self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > (4 if validation else 3):
+            supported = 5 if execution or git or validation or agent_models else 3
+            if version > supported:
                 raise IntegrityError(f"versão SQLite futura: {version}")
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.execute("PRAGMA foreign_keys=ON")
@@ -192,8 +203,8 @@ class SQLiteStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        target = 4 if self.validation else (3 if self.git else (2 if self.execution else 1))
-        supported_max = 4 if self.validation else 3
+        target = 5 if self.agent_models else (4 if self.validation else (3 if self.git else (2 if self.execution else 1)))
+        supported_max = 5 if self.execution or self.git or self.validation or self.agent_models else 3
         if version > supported_max:
             raise IntegrityError(f"versão SQLite futura: {version}")
         if version:
@@ -222,7 +233,8 @@ class SQLiteStore:
             next_version = version + 1
             self._backup()
             statements = (EXECUTION_SCHEMA if next_version == 2 else GIT_SCHEMA
-                          if next_version == 3 else VALIDATION_SCHEMA)
+                          if next_version == 3 else VALIDATION_SCHEMA
+                          if next_version == 4 else AGENT_SCHEMA)
             try:
                 with self.transaction() as db:
                     for statement in statements:

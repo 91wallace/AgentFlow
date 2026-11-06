@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .selection import ModelSelectionRequest, ModelSelectionObservation
+
 
 class ExecutionError(ValueError):
     """An execution request or attempt was rejected."""
@@ -43,6 +45,7 @@ class ExecutionRequest:
     policy: ExecutionPolicy
     acceptance_criteria: tuple[tuple[str, str], ...] = ()
     workspace_id: str = ""
+    model_selection: ModelSelectionRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,9 @@ class ProcessSpec:
     effective_sandbox: str
     effective_approval: str
     capabilities: tuple[str, ...] = ()
+    adapter_api_version: str = "1"
+    provider_id: str = "unknown"
+    model_id: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,7 @@ class ProcessResult:
     stdout_bytes: int
     stderr_bytes: int
     reason: str
+    request_metadata: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -88,6 +95,9 @@ class AgentResult:
     process_status: str
     summary: str
     declared_artifacts: tuple[str, ...] = ()
+    effective_provider_id: str = "unknown"
+    effective_model_id: str = "unknown"
+    selection_status: str = "unknown"
 
 
 class AgentAdapter(Protocol):

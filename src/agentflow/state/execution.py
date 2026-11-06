@@ -8,7 +8,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from agentflow.agents import ExecutionRequest, ProcessIdentity, ProcessResult, ProcessSpec
+from agentflow.agents import (ExecutionRequest, ModelSelectionObservation, ProcessIdentity,
+                              ProcessResult, ProcessSpec)
 from agentflow.planning import canonical, digest
 
 from .contracts import ConflictError, TransitionError
@@ -27,8 +28,10 @@ class Attempt:
 
 
 class ExecutionStore(SQLiteStore):
-    def __init__(self, path: Path):
-        super().__init__(path, execution=True, git=True)
+    def __init__(self, path: Path, *, agent_models: bool = False):
+        super().__init__(path, execution=True, git=True, validation=agent_models,
+                         agent_models=agent_models)
+
 
     def attempt(self, attempt_id: str) -> Attempt:
         row = self.db.execute("SELECT attempt_id,task_id,definition_revision,status,validation_status,operation_id FROM execution_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
@@ -53,8 +56,12 @@ class ExecutionStore(SQLiteStore):
                              "workspace": str(request.workspace.resolve()), "instruction": request.instruction,
                              "workspace_id": request.workspace_id,
                              "acceptance_criteria": request.acceptance_criteria,
-                             "policy": request.policy.__dict__, "retry_reason": retry_reason},
+                             "policy": request.policy.__dict__, "retry_reason": retry_reason,
+                             "model_selection": request.model_selection.request_data()
+                             if request.model_selection else None},
                               "adapter": spec.adapter_name, "version": spec.adapter_version,
+                              "adapter_api_version": spec.adapter_api_version,
+                              "provider_id": spec.provider_id, "model_id": spec.model_id,
                               "sandbox": spec.effective_sandbox, "approval": spec.effective_approval})
         with self.transaction() as db:
             prior = db.execute("SELECT attempt_id,request_digest FROM execution_attempts WHERE operation_id=?", (request.operation_id,)).fetchone()
@@ -117,10 +124,58 @@ class ExecutionStore(SQLiteStore):
                         request.workspace_id or None))
             db.execute("INSERT INTO operations(operation_id,request_digest,result_type,result_id,result_snapshot,created_at) VALUES(?,?,?,?,?,?)",
                        (request.operation_id, fingerprint, "execution_attempt", None, attempt_id, now()))
+            if self.agent_models:
+                if request.model_selection is None:
+                    raise TransitionError("seleção explícita requerida no fluxo de adapters F6")
+                selected = request.model_selection
+                if (selected.agent_id != spec.adapter_name
+                        or selected.provider_id != spec.provider_id
+                        or selected.model_id != spec.model_id):
+                    raise TransitionError("seleção solicitada diverge do adapter/modelo preparado")
+                snapshot = selected.as_snapshot(
+                    attempt_id=attempt_id, adapter_id=spec.adapter_name,
+                    adapter_api_version=spec.adapter_api_version,
+                    adapter_version=spec.adapter_version,
+                    prepared_provider_id=spec.provider_id, prepared_model_id=spec.model_id,
+                    capabilities=spec.capabilities, created_at=now())
+                encoded = canonical(snapshot)
+                db.execute("INSERT INTO agent_model_selections(attempt_id,snapshot_json,snapshot_digest,created_at) VALUES(?,?,?,?)",
+                           (attempt_id, encoded, digest(snapshot), snapshot["created_at"]))
             self._execution_event(db, attempt_id, "prepared", {"owner": owner})
             current = self.attempt(attempt_id)
             return Attempt(current.attempt_id, current.task_id, current.definition_revision,
                            current.status, current.validation_status, current.operation_id, True)
+
+    def model_selection_snapshot(self, attempt_id: str) -> dict | None:
+        row = self.db.execute("SELECT snapshot_json,snapshot_digest FROM agent_model_selections WHERE attempt_id=?",
+                              (attempt_id,)).fetchone()
+        if row is None:
+            return None
+        snapshot = json.loads(row[0])
+        if digest(snapshot) != row[1]:
+            raise TransitionError("snapshot de seleção corrompido")
+        return snapshot
+
+    def record_model_selection_observation(self, observation: ModelSelectionObservation) -> None:
+        with self.transaction() as db:
+            snapshot = self.model_selection_snapshot(observation.attempt_id)
+            if snapshot is None:
+                raise TransitionError("snapshot de seleção ausente")
+            expected = (snapshot["provider_id"], snapshot["model_id"])
+            actual = (observation.effective_provider_id, observation.effective_model_id)
+            expected_status = "confirmed" if expected == actual else ("unknown" if "unknown" in actual else "mismatch")
+            if observation.status != expected_status:
+                raise TransitionError("status da observação diverge da identidade efetiva")
+            prior = db.execute("SELECT provider_id,model_id,status,source,observed_at FROM agent_model_observations WHERE attempt_id=?",
+                               (observation.attempt_id,)).fetchone()
+            value = (observation.effective_provider_id, observation.effective_model_id,
+                     observation.status, observation.source, observation.observed_at)
+            if prior is not None:
+                if prior != value:
+                    raise ConflictError("observação de seleção divergente")
+                return
+            db.execute("INSERT INTO agent_model_observations(attempt_id,provider_id,model_id,status,source,observed_at) VALUES(?,?,?,?,?,?)",
+                       (observation.attempt_id, *value))
 
     @staticmethod
     def _execution_event(db: sqlite3.Connection, attempt_id: str, kind: str, payload: dict) -> None:
@@ -261,3 +316,10 @@ class ExecutionStore(SQLiteStore):
                 "wal_bytes": Path(str(self.path) + "-wal").stat().st_size if Path(str(self.path) + "-wal").exists() else 0,
                 "attempts": self.db.execute("SELECT count(*) FROM execution_attempts").fetchone()[0],
                 "events": self.db.execute("SELECT count(*) FROM execution_events").fetchone()[0]}
+
+
+class AgentExecutionStore(ExecutionStore):
+    """Execution state with the optional F6 immutable model-selection schema."""
+
+    def __init__(self, path: Path):
+        super().__init__(path, agent_models=True)
