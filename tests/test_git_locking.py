@@ -5,14 +5,24 @@ import sys
 
 import pytest
 
+import agentflow
 from agentflow.git.digests import operation_digest, pathset_digest
 from agentflow.git.locking import WorkspaceLock, process_identity
 
 
+if os.name == "nt":
+    import msvcrt as _platform_lock_api  # noqa: F401
+elif os.name == "posix":
+    import fcntl as _platform_lock_api  # noqa: F401
+else:
+    raise RuntimeError(f"unsupported lock-test platform: {os.name}")
+
+
 def _child_env() -> dict[str, str]:
     env = os.environ.copy()
-    source = str(Path(__file__).parents[1] / "src")
-    env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
+    package_root = str(Path(agentflow.__file__).resolve().parent.parent)
+    inherited = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = package_root + (os.pathsep + inherited if inherited else "")
     return env
 
 
@@ -35,7 +45,6 @@ def test_process_identity_contains_platform_start_marker():
 
 
 def test_workspace_lock_excludes_another_process(tmp_path):
-    pytest.importorskip("msvcrt" if os.name == "nt" else "fcntl")
     lock_path = tmp_path / "workspaces" / "ws.lock"
     script = (
         "import sys; from pathlib import Path; from agentflow.git.locking import WorkspaceLock; "
@@ -59,7 +68,6 @@ def test_workspace_lock_excludes_another_process(tmp_path):
 
 
 def test_abandoned_lock_is_reacquired_with_previous_owner_record(tmp_path):
-    pytest.importorskip("msvcrt" if os.name == "nt" else "fcntl")
     lock_path = tmp_path / "abandoned.lock"
     script = (
         "import sys,os; from pathlib import Path; from agentflow.git.locking import WorkspaceLock; "
