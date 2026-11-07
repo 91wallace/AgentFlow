@@ -40,6 +40,8 @@ def _openssl() -> str | None:
 def certificates(request):
     openssl = _openssl()
     if not openssl:
+        if os.environ.get("AGENTFLOW_REQUIRE_OPENSSL") == "1":
+            pytest.fail("OpenSSL CLI is required for the supported CI TLS tests")
         pytest.skip("OpenSSL CLI is unavailable for disposable TLS test certificates")
     temporary = tempfile.TemporaryDirectory(prefix="agentflow-approval-test-pki-")
     request.addfinalizer(temporary.cleanup)

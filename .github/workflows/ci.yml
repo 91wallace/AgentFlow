@@ -101,8 +101,29 @@ jobs:
           scripts = {item.name for item in distribution('agentflow').entry_points if item.group == 'console_scripts'}
           assert 'agentflow' in scripts, f'CLI entry point missing: {scripts}'
           PY
+      - name: Require OpenSSL for TLS security tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          candidates = [shutil.which('openssl')]
+          candidates.extend([
+              str(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Git/usr/bin/openssl.exe'),
+              '/usr/bin/openssl',
+          ])
+          executable = next((item for item in candidates if item and Path(item).is_file()), None)
+          if executable is None:
+              raise SystemExit('OpenSSL CLI is required for supported CI TLS tests')
+          result = subprocess.run([executable, 'version'], check=True, capture_output=True, text=True)
+          print(f'Required TLS test dependency: {result.stdout.strip()} ({executable})')
       - name: Test complete suite against clean package environment
         shell: bash
+        env:
+          AGENTFLOW_REQUIRE_OPENSSL: '1'
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then VENV_PY=".ci-venv/Scripts/python.exe"; else VENV_PY=".ci-venv/bin/python"; fi
           TEST_ROOT="$RUNNER_TEMP/agentflow-installed-tests"
