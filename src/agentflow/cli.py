@@ -47,9 +47,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentflow")
     parser.add_argument("--version", action="version", version=f"agentflow {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "doctor", "plan", "state", "audit", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup"):
+    for name in ("init", "doctor", "plan", "state", "audit", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup", "approval-preview"):
         command = commands.add_parser(name)
         command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
+        if name == "approval-preview":
+            command.add_argument("--broker-db", type=Path, required=True,
+                                 help="SQLite do Broker, aberto somente para leitura")
+            command.add_argument("--request-id", required=True)
         if name == "audit":
             command.add_argument("--format", choices=("human", "json"), default="human")
         if name == "execute":
@@ -90,6 +94,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             root, created = initialize(args.path)
             print(f"{root}: configuração {'criada' if created else 'existente; sem alterações'}")
+            return 0
+        if args.command == "approval-preview":
+            from .approval.presentation import PresentationError, render_readonly_preview
+            try:
+                sys.stdout.write(render_readonly_preview(args.broker_db, args.request_id))
+            except PresentationError as exc:
+                print(f"Erro: {exc}", file=sys.stderr)
+                return 2
             return 0
         root = repository_root(args.path.resolve())
         if args.command == "audit":

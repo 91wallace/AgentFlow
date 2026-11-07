@@ -9,7 +9,7 @@ description = "Local foundation for the AgentFlow development orchestrator"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 readme = "README.md"
-dependencies = []
+dependencies = ["cryptography>=46"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
