@@ -42,9 +42,22 @@ jobs:
               'agentflow/agents/routing.py',
               'agentflow/approval/__init__.py',
               'agentflow/approval/broker.py',
+              'agentflow/approval/contracts.py',
+              'agentflow/approval/identity.py',
+              'agentflow/approval/persistence.py',
+              'agentflow/approval/presentation.py',
+              'agentflow/approval/protocol.py',
+              'agentflow/approval/transport.py',
+              'agentflow/approval/webauthn.py',
+              'agentflow/recovery.py',
               'agentflow/state/audit.py',
               'agentflow/state/budgets.py',
               'agentflow/state/sdd.py',
+              'agentflow/teg/__init__.py',
+              'agentflow/teg/contracts.py',
+              'agentflow/teg/gateway.py',
+              'agentflow/teg/protocol.py',
+              'agentflow/teg/store.py',
           }
           missing = required - names
           assert not missing, f'F7 modules missing from wheel: {sorted(missing)}'
@@ -53,7 +66,7 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then VENV_PY=".ci-venv/Scripts/python.exe"; else VENV_PY=".ci-venv/bin/python"; fi
-          "$VENV_PY" -m pip install '.[test]'
+          "$VENV_PY" -m pip install .ci-wheelhouse/agentflow-*.whl 'pytest>=8,<10'
           "$VENV_PY" -m pip check
           "$VENV_PY" - <<'PY'
           import agentflow
@@ -65,20 +78,92 @@ jobs:
           dist_files = {str(item).replace('\\', '/') for item in distribution('agentflow').files or ()}
           required = {
               'agentflow/agents/routing.py',
+              'agentflow/approval/__init__.py',
               'agentflow/approval/broker.py',
+              'agentflow/approval/contracts.py',
+              'agentflow/approval/identity.py',
+              'agentflow/approval/persistence.py',
+              'agentflow/approval/presentation.py',
+              'agentflow/approval/protocol.py',
+              'agentflow/approval/transport.py',
+              'agentflow/approval/webauthn.py',
+              'agentflow/recovery.py',
               'agentflow/state/audit.py',
               'agentflow/state/budgets.py',
               'agentflow/state/sdd.py',
+              'agentflow/teg/__init__.py',
+              'agentflow/teg/contracts.py',
+              'agentflow/teg/gateway.py',
+              'agentflow/teg/protocol.py',
+              'agentflow/teg/store.py',
           }
           assert required <= dist_files, f'installed package missing F7 modules: {sorted(required - dist_files)}'
           scripts = {item.name for item in distribution('agentflow').entry_points if item.group == 'console_scripts'}
           assert 'agentflow' in scripts, f'CLI entry point missing: {scripts}'
           PY
-      - name: Test complete suite against clean package environment
+      - name: Require OpenSSL for TLS security tests
         shell: bash
         run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          candidates = [shutil.which('openssl')]
+          candidates.extend([
+              str(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Git/usr/bin/openssl.exe'),
+              '/usr/bin/openssl',
+          ])
+          executable = next((item for item in candidates if item and Path(item).is_file()), None)
+          if executable is None:
+              raise SystemExit('OpenSSL CLI is required for supported CI TLS tests')
+          result = subprocess.run([executable, 'version'], check=True, capture_output=True, text=True)
+          print(f'Required TLS test dependency: {result.stdout.strip()} ({executable})')
+      - name: Test complete suite against clean package environment
+        shell: bash
+        env:
+          AGENTFLOW_REQUIRE_OPENSSL: '1'
+        run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then VENV_PY=".ci-venv/Scripts/python.exe"; else VENV_PY=".ci-venv/bin/python"; fi
-          "$VENV_PY" -m pytest -q
+          TEST_ROOT="$RUNNER_TEMP/agentflow-installed-tests"
+          PYTEST_CONFIG="$RUNNER_TEMP/pytest-installed.ini"
+          PACKAGE_GUARD="$RUNNER_TEMP/agentflow-package-guard"
+          VENV_PY="$(cd "$(dirname "$VENV_PY")" && pwd)/$(basename "$VENV_PY")"
+          mkdir -p "$TEST_ROOT" "$PACKAGE_GUARD"
+          printf '[pytest]\n' > "$PYTEST_CONFIG"
+          cat > "$PACKAGE_GUARD/sitecustomize.py" <<'PY'
+          import importlib.abc
+          from importlib.machinery import PathFinder
+          from pathlib import Path
+          import site
+          import sys
+
+          _SITE_ROOTS = tuple(Path(item).resolve() for item in site.getsitepackages())
+
+          class _InstalledAgentFlowOnly(importlib.abc.MetaPathFinder):
+              def find_spec(self, fullname, path=None, target=None):
+                  if fullname != "agentflow" and not fullname.startswith("agentflow."):
+                      return None
+                  spec = PathFinder.find_spec(fullname, path, target)
+                  if spec is None:
+                      return None
+                  candidates = list(spec.submodule_search_locations or ())
+                  if spec.origin and spec.origin not in {"built-in", "frozen"}:
+                      candidates.append(spec.origin)
+                  for candidate in candidates:
+                      resolved = Path(candidate).resolve()
+                      if not any(resolved == root or root in resolved.parents for root in _SITE_ROOTS):
+                          raise ImportError(
+                              f"refusing non-installed AgentFlow module {fullname}: {resolved}"
+                          )
+                  return spec
+
+          sys.meta_path.insert(0, _InstalledAgentFlowOnly())
+          PY
+          cd "$TEST_ROOT"
+          PYTHONPATH="$PACKAGE_GUARD" "$VENV_PY" -m pytest -q \
+            -c "$PYTEST_CONFIG" --rootdir="$TEST_ROOT" "$GITHUB_WORKSPACE/tests"
       - name: Test editable installation
         shell: bash
         run: |

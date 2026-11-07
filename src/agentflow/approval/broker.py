@@ -1,9 +1,9 @@
 """Fail-closed Approval Broker boundary.
 
-This package intentionally contains no production issuer, IPC server, WebAuthn verifier,
-credential store, service installer, or consent UI. No runtime flag or environment value
-can activate grants. A separately homologated service can implement ApprovalAuthority in
-a later approved change; until then every operation is unavailable.
+This facade intentionally contains no production issuer, IPC server, service installer,
+or operational consent UI. Local WebAuthn and presentation modules are demonstrative only
+and cannot activate grants. No runtime flag or environment value enables protected
+operations; until a separate trust boundary is homologated every operation is unavailable.
 """
 
 from .contracts import ApprovalError, ApprovalRequest, ApprovalStatus, GrantReference
