@@ -108,6 +108,7 @@ jobs:
           TEST_ROOT="$RUNNER_TEMP/agentflow-installed-tests"
           PYTEST_CONFIG="$RUNNER_TEMP/pytest-installed.ini"
           PACKAGE_GUARD="$RUNNER_TEMP/agentflow-package-guard"
+          VENV_PY="$(cd "$(dirname "$VENV_PY")" && pwd)/$(basename "$VENV_PY")"
           mkdir -p "$TEST_ROOT" "$PACKAGE_GUARD"
           printf '[pytest]\n' > "$PYTEST_CONFIG"
           cat > "$PACKAGE_GUARD/sitecustomize.py" <<'PY'
