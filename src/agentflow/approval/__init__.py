@@ -4,9 +4,16 @@ from .contracts import (ApprovalAuthority, ApprovalError, ApprovalRequest,
                         ApprovalStatus, GrantReference, UnavailableApprovalAuthority)
 from .contracts import verify_and_consume
 from .broker import ApprovalBroker
+from .preparation import (ApproverDeviceConfig, AuthorityPreparationError,
+                          AuthorityProvisioningManifest, GrantBindingReport,
+                          PeerPinCheck, ServiceDomainConfig,
+                          inspect_grant_binding, verify_tls_peer_pin)
 from .protocol import (AcceptedSnapshot, ApprovalDecision, ApprovalRequest as BrokerApprovalRequest,
                        ExecutionAuthorization, ExecutionReceipt, OperationIntent, ProtocolError,
-                       SnapshotProposal, canonical_json, digest_json, parse_canonical_json)
+                       PendingProposalCancellation, PendingProposalInvalidation,
+                       PendingProposalQuery, PendingProposalSnapshot, PendingProposalSubmission,
+                       ProposalLifecycleSnapshot, SnapshotProposal, canonical_json, digest_json,
+                       parse_canonical_json)
 from .identity import (ClientAuthorizationDecision, ClientCredential, ClientIdentity,
                        ClientPolicy, certificate_fingerprint, evaluate_client_operation,
                        new_operation_nonce)
@@ -19,10 +26,13 @@ from .webauthn import (WebAuthnAssertion, WebAuthnChallenge, WebAuthnChallengeBi
 from .presentation import (ConsentPresentation, PresentationError, PresentedSnapshot,
                            build_presentation_readonly, render_consent_preview,
                            render_readonly_preview)
+from .service import BrokerServiceError, LocalBrokerService
 
 __all__ = ["ApprovalAuthority", "ApprovalError", "ApprovalRequest", "ApprovalStatus",
            "GrantReference", "UnavailableApprovalAuthority", "ApprovalBroker",
            "verify_and_consume", "AcceptedSnapshot", "SnapshotProposal", "OperationIntent",
+           "PendingProposalSubmission", "PendingProposalQuery", "PendingProposalSnapshot",
+           "PendingProposalCancellation", "PendingProposalInvalidation", "ProposalLifecycleSnapshot",
            "BrokerApprovalRequest", "ApprovalDecision", "ExecutionAuthorization",
            "ExecutionReceipt", "ProtocolError", "canonical_json", "digest_json",
            "parse_canonical_json", "ClientIdentity", "ClientCredential", "ClientPolicy",
@@ -36,3 +46,7 @@ __all__ += ["WebAuthnAssertion", "WebAuthnChallenge", "WebAuthnChallengeBinding"
             "build_credential", "verify_assertion_signature"]
 __all__ += ["ConsentPresentation", "PresentationError", "PresentedSnapshot",
             "build_presentation_readonly", "render_consent_preview", "render_readonly_preview"]
+__all__ += ["BrokerServiceError", "LocalBrokerService"]
+__all__ += ["ApproverDeviceConfig", "AuthorityPreparationError",
+            "AuthorityProvisioningManifest", "GrantBindingReport", "PeerPinCheck",
+            "ServiceDomainConfig", "inspect_grant_binding", "verify_tls_peer_pin"]

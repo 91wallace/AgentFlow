@@ -10,6 +10,7 @@ import sys
 
 from . import __version__
 from .config import ConfigError, load_config
+from .security import SecurityProfile, profile_diagnostic, save_profile_configuration
 from .environment.doctor import diagnose
 from .init import InitError, initialize, repository_root
 from .planning import PlanError, load_plan
@@ -89,12 +90,101 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--operation-id", required=True)
         if name == "complete":
             command.add_argument("--expected-revision", type=int, required=True)
+    profile = commands.add_parser("profile", help="configurar ou diagnosticar o perfil de segurança")
+    profile_commands = profile.add_subparsers(dest="profile_command", required=True)
+    profile_status = profile_commands.add_parser("status", help="mostrar perfil e capacidades indisponíveis")
+    profile_status.add_argument("--path", type=Path, default=Path.cwd())
+    profile_select = profile_commands.add_parser("select", help="registrar seleção explícita, sem habilitar grants")
+    profile_select.add_argument("--path", type=Path, default=Path.cwd())
+    profile_select.add_argument("--profile", required=True,
+                                choices=tuple(item.value for item in SecurityProfile))
+    profile_select.add_argument("--confirm", action="store_true", required=True,
+                                help="confirma a seleção local persistente do perfil")
+    webauthn_enroll = commands.add_parser(
+        "webauthn-enroll", help="cadastrar interativamente credencial Windows platform (não concede autorização)")
+    webauthn_enroll.add_argument("--broker-db", type=Path, required=True,
+                                 help="SQLite Broker local explícito para armazenar a chave pública")
+    local_auth = commands.add_parser("local-auth", help="credencial do operador LOCAL_SUPERVISED")
+    local_auth_commands = local_auth.add_subparsers(dest="local_auth_command", required=True)
+    local_auth_status = local_auth_commands.add_parser("status", help="diagnóstico local sem autenticar")
+    local_auth_status.add_argument("--path", type=Path, default=Path.cwd())
+    local_auth_enroll = local_auth_commands.add_parser("enroll", help="cadastro interativo do operador local")
+    local_auth_enroll.add_argument("--path", type=Path, default=Path.cwd())
+    local_auth_enroll.add_argument("--confirm-bootstrap", action="store_true", required=True,
+                                   help="confirma bootstrap explícito do proprietário local")
+    local_auth_revoke = local_auth_commands.add_parser("revoke", help="revogar a credencial local")
+    local_auth_revoke.add_argument("--path", type=Path, default=Path.cwd())
+    local_auth_revoke.add_argument("--confirm-revocation", action="store_true", required=True,
+                                   help="confirma explicitamente a revogação")
+    apl = commands.add_parser("apl", help="inspecionar ciclos Autonomous Planning Loop")
+    apl_commands = apl.add_subparsers(dest="apl_command", required=True)
+    for apl_name in ("start", "status", "history", "inspect", "pause", "resume", "cancel", "next", "submit-result", "replan", "proposals", "accept-plan", "reject-plan", "handoff", "handoff-status", "handoff-resume", "handoff-cancel", "handoff-review"):
+        apl_command = apl_commands.add_parser(apl_name)
+        apl_command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
+        if apl_name == "start":
+            apl_command.add_argument("--profile", required=True, choices=("developer",))
+            apl_command.add_argument("--objective", required=True)
+            apl_command.add_argument("--scope", action="append", required=True,
+                                     help="caminho explicitamente autorizado; pode repetir")
+        elif apl_name not in {"status", "proposals", "accept-plan", "reject-plan",
+                              "handoff", "handoff-status", "handoff-resume", "handoff-cancel",
+                              "handoff-review"}:
+            apl_command.add_argument("--cycle-id", required=True)
+        if apl_name == "submit-result":
+            apl_command.add_argument("--attempt-id", required=True,
+                                     help="referência para tentativa já persistida e validada")
+        if apl_name == "replan":
+            apl_command.add_argument("--planner", required=True, choices=("deterministic", "codex"))
+            apl_command.add_argument("--request-id", default="", help="chave idempotente opcional")
+            apl_command.add_argument("--enable-experimental-codex", action="store_true",
+                                     help="opt-in explícito ao planejador Codex não homologado")
+            apl_command.add_argument("--planner-timeout", type=int, default=240)
+            apl_command.add_argument("--planner-max-input-bytes", type=int, default=65536)
+            apl_command.add_argument("--planner-max-output-bytes", type=int, default=65536)
+        if apl_name in {"proposals", "accept-plan", "reject-plan"}:
+            apl_command.add_argument("--cycle-id", required=True)
+        if apl_name in {"accept-plan", "reject-plan"}:
+            apl_command.add_argument("--proposal-id", required=True)
+        if apl_name == "accept-plan":
+            apl_command.add_argument("--confirm", action="store_true", required=True,
+                                     help="confirma explicitamente a ativação da revisão proposta")
+        if apl_name in {"handoff", "handoff-status", "handoff-resume", "handoff-cancel"}:
+            apl_command.add_argument("--project-id", required=True)
+            apl_command.add_argument("--principal-id", required=True,
+                                     help="claim conferido pelo Broker contra a identidade mTLS")
+            apl_command.add_argument("--broker-port", type=int, required=True)
+            apl_command.add_argument("--server-name", default="localhost")
+            apl_command.add_argument("--ca", type=Path, required=True)
+            apl_command.add_argument("--client-cert", type=Path, required=True)
+            apl_command.add_argument("--client-key", type=Path, required=True)
+            apl_command.add_argument("--server-fingerprint", required=True)
+            apl_command.add_argument("--timeout", type=float, default=5.0)
+        if apl_name in {"handoff-status", "handoff-resume", "handoff-cancel", "handoff-review"}:
+            apl_command.add_argument("--cycle-id", required=True)
+            apl_command.add_argument("--proposal-id", required=True)
+        if apl_name == "handoff":
+            apl_command.add_argument("--cycle-id", required=True)
+            apl_command.add_argument("--planner", required=True, choices=("deterministic", "codex"))
+            apl_command.add_argument("--request-id", default="")
+            apl_command.add_argument("--enable-experimental-codex", action="store_true")
+            apl_command.add_argument("--planner-timeout", type=int, default=240)
+            apl_command.add_argument("--planner-max-input-bytes", type=int, default=65536)
+            apl_command.add_argument("--planner-max-output-bytes", type=int, default=65536)
     try:
         args = parser.parse_args(argv)
         if args.command == "init":
             root, created = initialize(args.path)
             print(f"{root}: configuração {'criada' if created else 'existente; sem alterações'}")
             return 0
+        if args.command == "profile":
+            root = repository_root(args.path.resolve())
+            profile_path = root / ".agentflow" / "security-profile.toml"
+            if args.profile_command == "select":
+                selected = SecurityProfile(args.profile)
+                save_profile_configuration(profile_path, selected)
+            diagnostic = profile_diagnostic(profile_path)
+            print(json.dumps(diagnostic.to_dict(), ensure_ascii=False, sort_keys=True))
+            return 2 if diagnostic.configuration_status == "invalid_or_missing" else 0
         if args.command == "approval-preview":
             from .approval.presentation import PresentationError, render_readonly_preview
             try:
@@ -103,7 +193,244 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Erro: {exc}", file=sys.stderr)
                 return 2
             return 0
+        if args.command == "webauthn-enroll":
+            from .approval.persistence import BrokerStore
+            from .security.windows_webauthn import (
+                WindowsHelloCredentialEnrollment, WindowsWebAuthnApi, WindowsWebAuthnError,
+            )
+            try:
+                api = WindowsWebAuthnApi()
+                if not api.platform_uv_available():
+                    raise WindowsWebAuthnError("windows_platform_uv_authenticator_unavailable")
+                with BrokerStore(args.broker_db) as broker_store:
+                    record, evidence = WindowsHelloCredentialEnrollment(
+                        broker_store, api).enroll_interactive()
+                print(json.dumps({**evidence, "credential_id": record.credential.credential_id,
+                                  "status": record.status, "dispatch_enabled": False},
+                                 sort_keys=True, ensure_ascii=False))
+                return 0
+            except Exception as exc:
+                print(f"Enrollment indisponível: {exc}", file=sys.stderr)
+                return 2
+        if args.command == "local-auth":
+            from .apl import SQLiteCycleStore
+            from .security import (LocalPassphraseError, SQLiteLocalOperatorCredentialStore,
+                                   current_local_operator_principal,
+                                   enroll_local_operator_interactive,
+                                   revoke_local_operator_interactive)
+            try:
+                root = repository_root(args.path.resolve())
+                state_path = root / ".agentflow" / "state.sqlite3"
+                if not state_path.is_file():
+                    raise LocalPassphraseError("agentflow_state_store_missing")
+                from .security import load_profile_configuration
+                selected_profile = load_profile_configuration(
+                    root / ".agentflow" / "security-profile.toml")
+                if selected_profile.profile is not SecurityProfile.LOCAL_SUPERVISED:
+                    raise LocalPassphraseError("local_supervised_profile_required")
+                principal = current_local_operator_principal()
+                apl_store = SQLiteCycleStore(state_path, initialize=False)
+                credentials = SQLiteLocalOperatorCredentialStore(apl_store)
+                if args.local_auth_command == "status":
+                    active = credentials.active(principal)
+                    print(json.dumps({"profile": "LOCAL_SUPERVISED",
+                                      "principal": principal,
+                                      "credential_enrolled": active is not None,
+                                      "mechanism": "local_passphrase_scrypt",
+                                      "dispatch_enabled": False}, sort_keys=True))
+                    return 0 if active else 2
+                if not sys.stdin.isatty():
+                    raise LocalPassphraseError("interactive_terminal_required")
+                if args.local_auth_command == "enroll":
+                    credential_id = enroll_local_operator_interactive(credentials, principal)
+                else:
+                    revoked = revoke_local_operator_interactive(credentials, principal)
+                    print(json.dumps({"profile": "LOCAL_SUPERVISED", "principal": principal,
+                                      "revoked": revoked, "dispatch_enabled": False}, sort_keys=True))
+                    return 0 if revoked else 2
+                print(json.dumps({"profile": "LOCAL_SUPERVISED", "principal": principal,
+                                  "credential_id": credential_id, "enrolled": True,
+                                  "dispatch_enabled": False}, sort_keys=True))
+                return 0
+            except Exception as exc:
+                print(f"Autenticação local indisponível: {exc}", file=sys.stderr)
+                return 2
         root = repository_root(args.path.resolve())
+        if args.command == "apl":
+            from .apl import SQLiteCycleStore, SupervisedCycleService
+            from .apl.contracts import APLState
+            state_path = root / ".agentflow" / "state.sqlite3"
+            if args.apl_command != "start" and not state_path.is_file():
+                raise StateError("banco operacional não existe; nenhum ciclo APL encontrado")
+            if args.apl_command == "start":
+                plan = load_plan(root / ".agentflow")
+                with ExecutionStore(state_path) as core_store:
+                    core_store.import_plan(plan)
+                store = SQLiteCycleStore(state_path)
+                service = SupervisedCycleService(store, state_path)
+                cycle = service.start(plan, args.objective, tuple(args.scope))
+                print(f"Ciclo supervisionado criado: {cycle.cycle_id} ({cycle.state.value}); jobs={len(cycle.jobs)}")
+                return 0
+            store = SQLiteCycleStore(state_path, initialize=args.apl_command in {"replan", "proposals", "accept-plan", "reject-plan"})
+            service = SupervisedCycleService(store, state_path)
+            if args.apl_command in {"handoff", "handoff-status", "handoff-resume", "handoff-cancel"}:
+                from .apl import BrokerHandoffService
+                from .approval.transport import LoopbackTLSClient
+                client = LoopbackTLSClient(
+                    host="127.0.0.1", port=args.broker_port, server_name=args.server_name,
+                    trust_anchor_pem=str(args.ca), client_certificate_pem=str(args.client_cert),
+                    client_private_key_pem=str(args.client_key),
+                    expected_server_fingerprint=args.server_fingerprint,
+                    timeout_seconds=args.timeout)
+                handoff = BrokerHandoffService(store, state_path, client,
+                                               project_id=args.project_id,
+                                               principal_id=args.principal_id)
+                if args.apl_command == "handoff":
+                    if args.planner == "deterministic":
+                        if args.enable_experimental_codex:
+                            raise StateError("--enable-experimental-codex só se aplica a --planner codex")
+                        from .apl import DeterministicPlannerAdapter
+                        adapter = DeterministicPlannerAdapter(
+                            rationale="deterministic baseline; no semantic changes inferred")
+                    else:
+                        if not args.enable_experimental_codex:
+                            raise StateError("Codex requer --enable-experimental-codex explícito")
+                        from .apl.codex_planner import CodexCLIPlannerAdapter
+                        adapter = CodexCLIPlannerAdapter(
+                            state_path, enabled=True, timeout_seconds=args.planner_timeout,
+                            max_input_bytes=args.planner_max_input_bytes,
+                            max_output_bytes=args.planner_max_output_bytes)
+                    proposal, _status, _created = service.replan(
+                        args.cycle_id, adapter, args.request_id or None)
+                    result = handoff.submit(args.cycle_id, proposal.proposal_id)
+                elif args.apl_command == "handoff-resume":
+                    result = handoff.resume(args.cycle_id, args.proposal_id)
+                elif args.apl_command == "handoff-cancel":
+                    result = handoff.cancel(args.cycle_id, args.proposal_id)
+                else:
+                    result = handoff.status(args.cycle_id, args.proposal_id)
+                print(json.dumps(result, sort_keys=True, ensure_ascii=False))
+                if result["status"] == "awaiting_authorization":
+                    print("Aguardando autoridade independente; Broker não autorizou dispatch.")
+                return 0
+            if args.apl_command == "handoff-review":
+                if not sys.stdin.isatty() or not sys.stdout.isatty():
+                    raise StateError("consent_review_requires_interactive_terminal")
+                from .approval.persistence import BrokerStore
+                from .security import (load_local_consent_configuration,
+                                       review_persisted_handoff)
+                from .security import load_profile_configuration
+                profile = load_profile_configuration(root / ".agentflow" / "security-profile.toml")
+                if profile.profile is not SecurityProfile.LOCAL_SUPERVISED:
+                    raise StateError("local_supervised_profile_required_for_consent_review")
+                config = load_local_consent_configuration(
+                    root / ".agentflow" / "local-consent.toml",
+                    project_root=root, state_database=state_path)
+                with BrokerStore(config.broker_database) as broker_store:
+                    outcome = review_persisted_handoff(
+                        cycle_store=store, state_database=state_path,
+                        broker_store=broker_store, config=config,
+                        cycle_id=args.cycle_id, proposal_id=args.proposal_id)
+                    print(json.dumps({
+                        "decision": outcome.decision.value,
+                        "decision_id": outcome.consent_decision_id,
+                        "grant_id": outcome.grant_id,
+                        "state": outcome.state,
+                        "reason": outcome.reason,
+                        "dispatch_enabled": False,
+                    }, ensure_ascii=False, sort_keys=True))
+                return 0 if outcome.state in {
+                    "approved", "rejected", "blocked", "expired", "revoked", "consumed"
+                } else 2
+            if args.apl_command == "replan":
+                if args.planner == "deterministic":
+                    if args.enable_experimental_codex:
+                        raise StateError("--enable-experimental-codex só se aplica a --planner codex")
+                    from .apl import DeterministicPlannerAdapter
+                    adapter = DeterministicPlannerAdapter(
+                        rationale="deterministic baseline: no semantic changes inferred; preserve current plan")
+                else:
+                    if not args.enable_experimental_codex:
+                        raise StateError("Codex requer --enable-experimental-codex explícito")
+                    from .apl.codex_planner import CodexCLIPlannerAdapter
+                    adapter = CodexCLIPlannerAdapter(
+                        state_path, enabled=True, timeout_seconds=args.planner_timeout,
+                        max_input_bytes=args.planner_max_input_bytes,
+                        max_output_bytes=args.planner_max_output_bytes)
+                proposal, status, created = service.replan(args.cycle_id, adapter, args.request_id or None)
+                print(f"Proposta {proposal.proposal_id}: {status}; nova={str(created).lower()}")
+                print("Proposta semântica experimental; revisão e aceite continuam supervisionados."
+                      if args.planner == "codex" else
+                      "Adaptador determinístico de baseline; nenhuma inferência semântica foi realizada.")
+                return 0
+            if args.apl_command == "proposals":
+                for proposal, digest_value, status in service.proposals(args.cycle_id):
+                    print(f"{proposal.proposal_id}: {status}; source={proposal.source_revision_id}; sha256:{digest_value}")
+                    print(f"  justificativa: {proposal.rationale}")
+                    print(f"  condição de conclusão: {proposal.completion_condition}")
+                    for change in proposal.changes:
+                        print(f"  {change.action}: {change.task.job_id} scope={','.join(change.task.required_scope)} deps={','.join(change.task.depends_on)} criteria={','.join(change.task.acceptance_criteria)}")
+                return 0
+            if args.apl_command == "accept-plan":
+                cycle = service.accept_plan(args.cycle_id, args.proposal_id, confirmed=args.confirm)
+                print(f"Plano aceito: {cycle.plan_revision_id}; ciclo {cycle.cycle_id} {cycle.state.value}")
+                return 0
+            if args.apl_command == "reject-plan":
+                changed = service.reject_plan(args.cycle_id, args.proposal_id)
+                print(f"Proposta {args.proposal_id}: {'rejeitada' if changed else 'já rejeitada'}")
+                return 0
+            if args.apl_command in ("pause", "resume", "cancel"):
+                action = getattr(service, args.apl_command)
+                cycle = action(args.cycle_id)
+                print(f"Ciclo {cycle.cycle_id}: {cycle.state.value}")
+                return 0
+            if args.apl_command == "next":
+                job = service.next_job(args.cycle_id)
+                if job is None:
+                    print("Nenhum job elegível")
+                else:
+                    print(f"Job proposto: {job.job_id}\n{job.instruction}")
+                    print(f"Escopo: {', '.join(job.required_scope)}")
+                    print(f"Dependências: {', '.join(job.depends_on) or '-'}")
+                    print(f"Critérios: {', '.join(job.acceptance_criteria)}")
+                    print("Nenhuma execução foi iniciada.")
+                return 0
+            if args.apl_command == "submit-result":
+                cycle = service.submit_result(args.cycle_id, args.attempt_id)
+                print(f"Resultado persistido associado ao ciclo {cycle.cycle_id}: {cycle.state.value}")
+                return 0
+            if args.apl_command == "status":
+                cycles = store.list_cycles()
+                if not cycles:
+                    print("Nenhum ciclo APL persistido")
+                for cycle in cycles:
+                    print(f"{cycle.cycle_id}: {cycle.state.value}; jobs={len(cycle.jobs)}; "
+                          f"resultados={len(cycle.outcomes)}; iterações={cycle.iterations}; "
+                          f"orçamento observado={cycle.consumed_budget:g}; motivo={cycle.reason or '-'}")
+                return 0
+            cycle = store.load(args.cycle_id)
+            if args.apl_command == "history":
+                for event in store.history(args.cycle_id):
+                    print(f"r{event['revision']} {event['state']} sha256:{event['snapshot_digest']}")
+                for event in store.planner_events(args.cycle_id):
+                    suffix = f"; {event['detail']}" if event["detail"] else ""
+                    print(f"planner r{event['cycle_revision']} {event['provider']} {event['status']} sha256:{event['request_digest']}{suffix}")
+                return 0
+            print(f"Ciclo {cycle.cycle_id}: {cycle.state.value}")
+            print(f"Objetivo: {cycle.objective}")
+            print(f"Escopo imutável: {', '.join(cycle.authorized_scope)}")
+            print(f"Digest do plano: {cycle.plan_digest or '-'}")
+            print(f"Bloqueio/motivo: {cycle.reason or '-'}")
+            outcomes = dict(cycle.outcomes)
+            for job in cycle.jobs:
+                outcome = outcomes.get(job.job_id)
+                print(f"Job {job.job_id}: {'pendente' if outcome is None else outcome.status}; "
+                      f"escopo={','.join(job.required_scope)}; critérios={','.join(job.acceptance_criteria)}")
+                if outcome is not None:
+                    print(f"  resumo: {outcome.summary or '-'}")
+                    for evidence in outcome.evidence:
+                        print("  evidência: " + json.dumps(evidence, ensure_ascii=False, sort_keys=True))
+            return 0
         if args.command == "audit":
             report = inspect_phase7_database(root / ".agentflow" / "state.sqlite3")
             if args.format == "json":
@@ -378,10 +705,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if result.status.value == "passed" else 1
         config = load_config(root / ".agentflow" / "config.toml")
         checks = diagnose(config)
+        profile_info = profile_diagnostic(root / ".agentflow" / "security-profile.toml")
+        print("security_profile: " + json.dumps(profile_info.to_dict(), ensure_ascii=False, sort_keys=True))
         for check in checks:
             requirement = "obrigatório" if check.required else "opcional"
             print(f"{check.name}: {check.status} ({requirement}) — {check.detail}")
         return 1 if any(c.required and c.status != "ok" for c in checks) else 0
-    except (ConfigError, InitError, PlanError, StateError, ExecutionError, GitError) as exc:
+    except (ConfigError, InitError, PlanError, StateError, ExecutionError, GitError,
+            ValueError, RuntimeError) as exc:
         print(f"Erro: {exc}", file=sys.stderr)
         return 2

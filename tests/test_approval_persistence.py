@@ -16,6 +16,7 @@ from agentflow.approval.persistence import (
     BrokerStore,
     BrokerStoreError,
     BrokerStoreLocked,
+    SCHEMA_VERSION,
 )
 from agentflow.approval.protocol import (
     ApprovalDecision,
@@ -135,12 +136,12 @@ def test_broker_store_uses_isolated_schema_and_never_opens_agentflow_state(tmp_p
     broker_path = tmp_path / "broker" / "authority.sqlite"
     with BrokerStore(broker_path) as store:
         assert store.db.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert store.db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert store.db.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "wal"
         assert store.db.execute("PRAGMA synchronous").fetchone()[0] == 2
         assert store.verify_integrity() is None
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     with pytest.raises(BrokerStoreError, match=".agentflow"):
         BrokerStore(tmp_path / ".agentflow" / "state.sqlite3")
 
@@ -196,6 +197,19 @@ def _bundle_snapshot_proposal():
     )
 
 
+def _lifecycle_proposal(snapshot_id, operation_id, *, revision_id, parent_digest=None,
+                        proposed_by="lifecycle-owner", content=None):
+    started, _ = _times()
+    body = content if content is not None else {"revision": revision_id}
+    return SnapshotProposal(
+        protocol_version=1, snapshot_id=snapshot_id, kind="plan", project_id="demo",
+        revision_id=revision_id, schema_version=1, content_json=canonical_json(body),
+        canonical_digest=digest_json(body), provenance_json=canonical_json({"source": "test"}),
+        proposed_by=proposed_by, operation_id=operation_id, proposed_at=started,
+        parent_digest=parent_digest,
+    )
+
+
 def test_snapshots_are_immutable_pending_by_default_and_idempotent(tmp_path):
     proposal = _bundle_snapshot_proposal()
     with BrokerStore(tmp_path / "broker.sqlite") as store:
@@ -217,6 +231,137 @@ def test_snapshots_are_immutable_pending_by_default_and_idempotent(tmp_path):
         with pytest.raises(BrokerConflict):
             store.propose_snapshot(changed)
         assert store.verify_integrity() is None
+
+
+def test_pending_proposal_cancellation_is_owner_bound_idempotent_and_recoverable(tmp_path):
+    path = tmp_path / "broker.sqlite"
+    proposal = _lifecycle_proposal("cancel-snapshot", "cancel-proposal-op", revision_id="r1")
+    with BrokerStore(path) as store:
+        store.propose_snapshot(proposal)
+        with pytest.raises(BrokerStoreError, match="unavailable"):
+            store.cancel_pending_proposal(
+                proposal.snapshot_id, principal_id="different-principal", operation_id="denied-cancel")
+        first = store.cancel_pending_proposal(
+            proposal.snapshot_id, principal_id="lifecycle-owner", operation_id="cancel-once")
+        replay = store.cancel_pending_proposal(
+            proposal.snapshot_id, principal_id="lifecycle-owner", operation_id="cancel-once")
+        assert first == replay and first.state == "cancelled"
+        events = [event for event in store.list_events("snapshot", proposal.snapshot_id)
+                  if event["event_type"] == "snapshot.status_changed"]
+        assert len(events) == 1
+        assert events[0]["payload"]["operation_id"] == "cancel-once"
+        with pytest.raises(BrokerConflict):
+            store.cancel_pending_proposal(
+                proposal.snapshot_id, principal_id="lifecycle-owner", operation_id="cancel-again")
+        store.verify_integrity()
+    with BrokerStore(path) as reopened:
+        record = reopened.get_proposal_lifecycle_for_identity(
+            proposal.snapshot_id, principal_id="lifecycle-owner", authorized_project_ids=("demo",))
+        assert record is not None and record.state == "cancelled"
+        reopened.verify_integrity()
+
+
+def test_pending_proposal_expiry_is_deterministic_and_recoverable(tmp_path):
+    path = tmp_path / "broker.sqlite"
+    proposal = _lifecycle_proposal("expiry-snapshot", "expiry-proposal-op", revision_id="r1")
+    with BrokerStore(path) as store:
+        store.propose_snapshot(proposal)
+        event = next(item for item in store.list_events("snapshot", proposal.snapshot_id)
+                     if item["event_type"] == "snapshot.proposed")
+        received = datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00"))
+        as_of = received + timedelta(seconds=7 * 24 * 60 * 60 + 1)
+        assert store.expire_pending_proposals(as_of=as_of) == 1
+        assert store.expire_pending_proposals(as_of=as_of) == 0
+        record = store.get_proposal_lifecycle_for_identity(
+            proposal.snapshot_id, principal_id="lifecycle-owner", authorized_project_ids=("demo",))
+        assert record is not None and record.state == "expired"
+        assert record.event_payload["reason"] == "ttl_elapsed"
+        store.verify_integrity()
+    with BrokerStore(path) as reopened:
+        with pytest.raises(BrokerConflict):
+            reopened.cancel_pending_proposal(
+                proposal.snapshot_id, principal_id="lifecycle-owner", operation_id="resurrect-expired")
+        record = reopened.get_proposal_lifecycle_for_identity(
+            proposal.snapshot_id, principal_id="lifecycle-owner", authorized_project_ids=("demo",))
+        assert record is not None and record.state == "expired"
+        reopened.verify_integrity()
+
+
+def test_obsolete_proposal_requires_linked_new_revision_and_is_idempotent(tmp_path):
+    with BrokerStore(tmp_path / "broker.sqlite") as store:
+        previous = _lifecycle_proposal("revision-old", "revision-old-op", revision_id="r1")
+        store.propose_snapshot(previous)
+        invalid = _lifecycle_proposal("revision-invalid", "revision-invalid-op",
+                                      revision_id="r2", parent_digest=digest_json({"wrong": True}))
+        store.propose_snapshot(invalid)
+        with pytest.raises(BrokerConflict, match="newer linked revision"):
+            store.obsolete_pending_proposal(
+                previous.snapshot_id, invalid.snapshot_id,
+                principal_id="lifecycle-owner", operation_id="invalid-obsolete")
+        current = _lifecycle_proposal("revision-new", "revision-new-op", revision_id="r2",
+                                      parent_digest=previous.canonical_digest)
+        store.propose_snapshot(current)
+        first = store.obsolete_pending_proposal(
+            previous.snapshot_id, current.snapshot_id,
+            principal_id="lifecycle-owner", operation_id="obsolete-once")
+        replay = store.obsolete_pending_proposal(
+            previous.snapshot_id, current.snapshot_id,
+            principal_id="lifecycle-owner", operation_id="obsolete-once")
+        assert first == replay and first.state == "obsolete"
+        record = store.get_proposal_lifecycle_for_identity(
+            previous.snapshot_id, principal_id="lifecycle-owner", authorized_project_ids=("demo",))
+        assert record is not None and record.state == "obsolete"
+        assert record.event_payload["superseding_snapshot_id"] == current.snapshot_id
+        assert store.verify_integrity() is None
+
+
+def test_concurrent_lifecycle_replay_produces_one_transition(tmp_path):
+    proposal = _lifecycle_proposal("concurrent-cancel", "concurrent-proposal-op", revision_id="r1")
+    with BrokerStore(tmp_path / "broker.sqlite") as store:
+        store.propose_snapshot(proposal)
+        def cancel():
+            return store.cancel_pending_proposal(
+                proposal.snapshot_id, principal_id="lifecycle-owner", operation_id="same-cancel-op")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: cancel(), range(8)))
+        assert len(set(results)) == 1
+        events = [event for event in store.list_events("snapshot", proposal.snapshot_id)
+                  if event["event_type"] == "snapshot.status_changed"]
+        assert len(events) == 1
+        assert store.verify_integrity() is None
+
+
+def test_v3_schema_migration_preserves_snapshot_history_and_adds_terminal_states(tmp_path):
+    path = tmp_path / "legacy-v3.sqlite"
+    proposal = _lifecycle_proposal("legacy-pending", "legacy-proposal-op", revision_id="r1")
+    with BrokerStore(path) as store:
+        store.propose_snapshot(proposal)
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA foreign_keys=OFF")
+        db.execute("BEGIN")
+        for trigger in ("local_consent_immutable_update", "local_consent_immutable_delete",
+                        "local_grants_immutable_update", "local_grants_immutable_delete"):
+            db.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for table in ("local_authorization_state", "local_authorization_grants",
+                      "local_consent_decisions"):
+            db.execute(f'DROP TABLE IF EXISTS "{table}"')
+        db.execute("ALTER TABLE snapshot_state RENAME TO snapshot_state_v4")
+        db.execute(
+            "CREATE TABLE snapshot_state (snapshot_id TEXT PRIMARY KEY REFERENCES broker_snapshots(snapshot_id), "
+            "status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','expired','revoked')), "
+            "actor_id TEXT NOT NULL, changed_at TEXT NOT NULL, last_event_id TEXT NOT NULL)"
+        )
+        db.execute("INSERT INTO snapshot_state SELECT * FROM snapshot_state_v4")
+        db.execute("DROP TABLE snapshot_state_v4")
+        db.execute("PRAGMA user_version=3")
+        db.commit()
+    with BrokerStore(path) as migrated:
+        assert migrated.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert migrated.get_snapshot(proposal.snapshot_id) == proposal
+        cancelled = migrated.cancel_pending_proposal(
+            proposal.snapshot_id, principal_id="lifecycle-owner", operation_id="after-migration-cancel")
+        assert cancelled.state == "cancelled"
+        assert migrated.verify_integrity() is None
 
 
 def test_intent_requires_existing_accepted_snapshots_and_digest_matches(tmp_path):

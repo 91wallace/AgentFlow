@@ -253,6 +253,122 @@ class SnapshotProposal(WireContract):
 
 
 @dataclass(frozen=True)
+class PendingProposalSubmission(WireContract):
+    """Authenticated transport operation to persist one immutable pending proposal."""
+
+    protocol_version: int
+    operation_id: str
+    proposal_json: str
+
+    def __post_init__(self) -> None:
+        _check_version(self.protocol_version)
+        _identifier(self.operation_id, "operation_id")
+        proposal = SnapshotProposal.from_json(self.proposal_json)
+        if proposal.operation_id != self.operation_id:
+            raise ProtocolError("submission and proposal operation IDs differ")
+
+
+@dataclass(frozen=True)
+class PendingProposalQuery(WireContract):
+    """Authenticated read operation for one proposal owned by the caller."""
+
+    protocol_version: int
+    operation_id: str
+    snapshot_id: str
+
+    def __post_init__(self) -> None:
+        _check_version(self.protocol_version)
+        _identifier(self.operation_id, "operation_id")
+        _identifier(self.snapshot_id, "snapshot_id")
+
+
+@dataclass(frozen=True)
+class PendingProposalCancellation(WireContract):
+    """Owner request to cancel a proposal; it carries no authority identity."""
+
+    protocol_version: int
+    operation_id: str
+    snapshot_id: str
+
+    def __post_init__(self) -> None:
+        _check_version(self.protocol_version)
+        _identifier(self.operation_id, "operation_id")
+        _identifier(self.snapshot_id, "snapshot_id")
+
+
+@dataclass(frozen=True)
+class PendingProposalInvalidation(WireContract):
+    """Request to obsolete one proposal through a linked newer revision."""
+
+    protocol_version: int
+    operation_id: str
+    snapshot_id: str
+    superseding_snapshot_id: str
+
+    def __post_init__(self) -> None:
+        _check_version(self.protocol_version)
+        for name in ("operation_id", "snapshot_id", "superseding_snapshot_id"):
+            _identifier(getattr(self, name), name)
+        if self.snapshot_id == self.superseding_snapshot_id:
+            raise ProtocolError("a proposal cannot supersede itself")
+
+
+@dataclass(frozen=True)
+class PendingProposalSnapshot(WireContract):
+    """Minimal pending-only snapshot returned by the non-authoritative Broker."""
+
+    protocol_version: int
+    snapshot_id: str
+    revision_id: str
+    digest: str
+    status: str
+    client_id: str
+    principal_id: str
+    journal_sequence: int
+    authority_status: str
+    dispatch_allowed: bool
+
+    def __post_init__(self) -> None:
+        _check_version(self.protocol_version)
+        for name in ("snapshot_id", "revision_id", "client_id", "principal_id"):
+            _identifier(getattr(self, name), name)
+        _digest(self.digest, "digest")
+        if self.status != "pending":
+            raise ProtocolError("only pending proposals can be returned")
+        if type(self.journal_sequence) is not int or self.journal_sequence < 1:
+            raise ProtocolError("journal_sequence must be a positive integer")
+        if self.authority_status != "unavailable" or self.dispatch_allowed is not False:
+            raise ProtocolError("pending snapshot response cannot assert authority or dispatch")
+
+
+@dataclass(frozen=True)
+class ProposalLifecycleSnapshot(WireContract):
+    """Metadata-only current/terminal proposal state; never contains proposal content."""
+
+    protocol_version: int
+    snapshot_id: str
+    revision_id: str
+    digest: str
+    status: str
+    principal_id: str
+    journal_sequence: int
+    authority_status: str
+    dispatch_allowed: bool
+
+    def __post_init__(self) -> None:
+        _check_version(self.protocol_version)
+        for name in ("snapshot_id", "revision_id", "principal_id"):
+            _identifier(getattr(self, name), name)
+        _digest(self.digest, "digest")
+        _enum(self.status, {"pending", "accepted", "rejected", "expired", "revoked",
+                            "cancelled", "obsolete"}, "proposal lifecycle status")
+        if type(self.journal_sequence) is not int or self.journal_sequence < 1:
+            raise ProtocolError("journal_sequence must be a positive integer")
+        if self.authority_status != "unavailable" or self.dispatch_allowed is not False:
+            raise ProtocolError("proposal lifecycle response cannot assert authority or dispatch")
+
+
+@dataclass(frozen=True)
 class OperationIntent(WireContract):
     protocol_version: int
     operation_id: str

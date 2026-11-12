@@ -17,3 +17,11 @@ Status: aprovado para implementação da Fase 2, 2026-11-04.
 O núcleo depende de protocolos, sem importar SQLite. A CLI da Fase 2 valida e inspeciona, sem executar agentes. Corrupção, versão futura e divergência de plano impedem escrita e preservam os arquivos para diagnóstico. A restauração de backup é manual. Custos de sincronização e autoria não autenticada são riscos aceitos nesta fase.
 
 A inspeção da CLI abre um snapshot imutável somente quando não existe WAL pendente. Nessa condição, recusa a leitura com erro controlado; a reabertura/reconciliação operacional deve preceder nova inspeção. Isso evita criar WAL/SHM ou mostrar estado incompleto durante uma inspeção prometida como somente leitura.
+
+## Addendum SDD — evolução futura
+
+As decisões acima fornecem a base de SDD (TOML versionado, digests canônicos, definições imutáveis de tarefa, critérios e revalidação), mas não implementam uma revisão imutável first-class da especificação inteira nem uma aprovação explícita de mudanças de requisitos. A Fase 7 planejará esses contratos sem reinterpretar o comportamento já homologado da Fase 2.
+
+A evolução deve manter `.agentflow/spec.toml` e `.agentflow/tasks.toml` como únicos arquivos de definição versionados. Revisões aceitas da especificação e do plano serão snapshots append-only no estado SQLite; mudança importada será proposta e submetida a análise de impacto/aceite antes de se tornar executável. Critérios de tarefas terão vínculos explícitos a IDs de requisitos; TOMLs existentes sem esses vínculos permanecem legíveis como `legacy_unmapped`, sem inferência por texto. Migração SQLite será aditiva, backup-first, transacional e compatível com bancos existentes, definida por ADR próprio antes de implementação.
+
+Importação idempotente e revalidação de tarefa continuam válidas, mas não devem ser apresentadas como prova de aceite explícito da especificação. Evidências históricas permanecem imutáveis; somente evidências compatíveis com a revisão e checkpoint vigentes podem satisfazer critérios atuais. Veja ADR 0007 para os princípios transversais propostos.

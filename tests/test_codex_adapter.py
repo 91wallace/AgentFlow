@@ -5,7 +5,9 @@ import sys
 
 import pytest
 
-from agentflow.agents import ExecutionError, ExecutionPolicy, ExecutionRequest
+from agentflow.agents import (AgentCapabilities, ExecutionError, ExecutionPolicy,
+                              ExecutionRequest, NormalizedAgentState,
+                              normalize_execution_state)
 from agentflow.agents.codex import CodexAdapter
 
 
@@ -40,6 +42,29 @@ def test_explicit_full_access_and_noninteractive_approval(tmp_path, monkeypatch)
     spec = subject.prepare(request(tmp_path, ExecutionPolicy(sandbox="danger-full-access", approval="never")))
     assert "danger-full-access" in spec.arguments
     assert "--ask-for-approval" in spec.arguments and "never" in spec.arguments
+    assert spec.arguments[:3] == ("--ask-for-approval", "never", "exec")
+    assert "--config" not in spec.arguments
+    assert spec.cwd == request(tmp_path).workspace.resolve()
+    assert spec.arguments[spec.arguments.index("-C") + 1] == str(spec.cwd)
+
+
+def test_trust_override_is_per_invocation_and_workspace_scoped(tmp_path, monkeypatch):
+    subject = CodexAdapter(Path(sys.executable), trust_workspace_for_invocation=True)
+    def fake_run(command, **kwargs):
+        if "--version" in command:
+            output = "codex-cli 0.166.0"
+        elif command == [str(Path(sys.executable)), "--help"]:
+            output = "--ask-for-approval never on-request"
+        elif command[-2:] == ["login", "status"]:
+            output = "Logged in"
+        else:
+            output = HELP
+        return subprocess.CompletedProcess(command, 0, output, "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    spec = subject.prepare(request(tmp_path, ExecutionPolicy(sandbox="read-only", approval="never")))
+    config = spec.arguments[spec.arguments.index("--config") + 1]
+    assert config == f'projects."{spec.cwd.as_posix()}".trust_level="trusted"'
+    assert spec.arguments.index("--config") < spec.arguments.index("exec")
 
 
 def test_unknown_version_or_capability_fails_before_spawn(tmp_path, monkeypatch):
@@ -55,3 +80,48 @@ def test_partial_policy_is_unverifiable(tmp_path, monkeypatch):
     subject = adapter(tmp_path, monkeypatch)
     with pytest.raises(ExecutionError, match="não verificável"):
         subject.prepare(request(tmp_path, ExecutionPolicy(sandbox="read-only")))
+
+
+def test_codex_adapter_rejects_non_git_workspace(tmp_path, monkeypatch):
+    subject = adapter(tmp_path, monkeypatch)
+    invalid = tmp_path / "not-a-repository"
+    invalid.mkdir()
+    with pytest.raises(ExecutionError, match="workspace Git inválido"):
+        subject.prepare(ExecutionRequest("p", "t", 1, "hash", "op", invalid, "Do work",
+                                         ExecutionPolicy(sandbox="read-only", approval="never")))
+
+
+def test_codex_exposes_common_lifecycle_contract_without_claiming_session_recovery(
+        tmp_path, monkeypatch):
+    subject = adapter(tmp_path, monkeypatch)
+    availability = subject.discover()
+    assert availability.status == "available"
+    assert availability.version == "0.166.0"
+    assert availability.reason_code == "version_tested"
+    capability = subject.capabilities()
+    assert isinstance(capability, AgentCapabilities)
+    assert capability.structured_result_format == ("jsonl",)
+    assert capability.agent_session_tracking is False
+    assert capability.agent_session_cancellation is False
+    assert capability.agent_session_recovery is False
+    assert capability.process_monitoring_owner == "agentflow.runtime.local"
+    assert capability.process_cancellation_owner == "agentflow.runtime.local"
+    assert capability.process_recovery_owner == "agentflow.state.execution"
+
+
+def test_codex_experimental_version_is_discovered_but_not_marked_homologated(
+        tmp_path, monkeypatch):
+    subject = adapter(tmp_path, monkeypatch, version="codex-cli 0.167.0")
+    availability = subject.discover()
+    assert availability.status == "unknown"
+    assert availability.reason_code == "version_not_homologated"
+
+
+def test_shared_state_normalization_preserves_ambiguous_outcomes():
+    assert normalize_execution_state("prepared") is NormalizedAgentState.READY
+    assert normalize_execution_state("running") is NormalizedAgentState.RUNNING
+    assert normalize_execution_state("process_succeeded") is NormalizedAgentState.SUCCEEDED
+    assert normalize_execution_state("cancelled") is NormalizedAgentState.CANCELLED
+    assert normalize_execution_state("timed_out") is NormalizedAgentState.UNKNOWN
+    assert normalize_execution_state("interrupted") is NormalizedAgentState.UNKNOWN
+    assert normalize_execution_state("future-status") is NormalizedAgentState.UNKNOWN

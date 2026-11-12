@@ -1,5 +1,7 @@
 # Progresso da Fase 2
 
+Fase 2 integrada à `main` pelo [PR #2](https://github.com/91wallace/AgentFlow/pull/2) em 2026-11-04, merge commit `c82ece560f2d1bf618d2f80e29c15a40ea19444b`. O commit revisado `71f8b326e1d2981cced8091b89064eb1ed3d2cb8` passou nos seis jobs de push/PR para Python 3.11, 3.12 e 3.13. A Fase 3 ainda não foi implementada.
+
 | Tarefa | Estado | Evidência |
 | --- | --- | --- |
 | F2-01 | Concluída | ADR 0002 registrado; `git diff --check` sem erros. |

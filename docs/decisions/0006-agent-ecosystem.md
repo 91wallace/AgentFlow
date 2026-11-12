@@ -118,6 +118,10 @@ O contrato Codex e suas proteções permanecem; adapters compartilham execução
 
 `ModelSelection` por tentativa é auditável e fica separada da futura `ModelRoutingPolicy`. Um adapter que não confirma modelo efetivo não pode afirmar seleção confirmada. A Fase 6 fornece extensibilidade e opções manuais; nenhuma regra automática pode escalonar ou consumir budgets.
 
+## Addendum SDD — proveniência das seleções
+
+F6 persiste snapshots de `ModelSelection` por tentativa e se relaciona hoje à definição/revisão por meio do registro da tentativa; isso não equivale a um contrato first-class de `SpecificationRevision` ou a rastreabilidade de requisitos individuais. Uma evolução posterior deve incluir `SpecificationRevision`, `PlanRevision`, tarefa/revisão e IDs de requisito/critério no contexto imutável da decisão de roteamento e da tentativa. Mudança de revisão não altera snapshots históricos; decisão baseada em revisão proposta, não aceita ou stale deve ser recusada. A Fase 7 define a política e os contratos; não se introduz roteamento, fallback ou retry nesta consolidação documental.
+
 Riscos residuais incluem CLI/API instável, autenticação/credenciais/custos, licença e termos de uso, execução de código por plugins, cancelamento diferente em Windows/Linux, capabilities anunciadas mas não aplicadas, migração de estado, compatibilidade dos formatos de saída e obsolescência de prompt packs. Implementar um adapter não certifica o provider nem estabelece equivalência com Codex.
 
 ## Referências consultadas

@@ -4,6 +4,47 @@
 
 Fase 1 estabelece um pacote `agentflow` instalável, comandos seguros `--version`, `init` e `doctor`, configuração TOML, testes pytest, CI e instruções de instalação. O protótipo `autonomous-development-runner/` permanece intacto. Nenhuma tarefa desta fase inicia agentes, cria contêineres, grava SQLite ou faz commits. Cada tarefa abaixo deve ser concluída e verificada antes das dependentes.
 
+## SDD transversal — diagnóstico e contrato evolutivo
+
+### O que já existe
+
+- `.agentflow/spec.toml` e `.agentflow/tasks.toml` são os arquivos de definição versionados; TOML tem schema versionado, IDs estáveis, critérios de aceite, dependências DAG e digest SHA-256 canônico.
+- F2 persiste `projects.spec_digest/tasks_digest/plan_revision` e snapshots `task_definitions` imutáveis com `definition_revision`, `definition_digest` e `spec_digest`. Import idempotente preserva a mesma revisão; mudanças criam novas definições. Tarefas iniciadas/alteradas requerem revalidação explícita; eventos e evidências permanecem históricos.
+- F3 vincula reserva/tentativa à revisão e digest; execução bem-sucedida não conclui sem critérios verificados. F4 associa workspace/branch/checkpoint à tarefa/revisão e escopo autorizado. F5 vincula validation run, gate, snapshot, validator, evidência e artifact ao definition digest e checkpoint; resultado incompatível/stale não justifica conclusão.
+- F6 `ModelSelection` é snapshot por tentativa, persistido com provider/model/adapter e policy digests; hoje sua ligação à spec é indireta via tentativa e `definition_revision`/digest.
+
+### Lacunas verificadas
+
+1. Não há registro imutável first-class `SpecificationRevision` com snapshot completo da spec e trilha própria de proposta/aceite. A tabela `projects` retém somente os digests correntes; snapshots de tarefa guardam digest da spec, mas não substituem o snapshot do documento inteiro.
+2. Critérios de tarefa não têm vínculo explícito versionado com IDs dos critérios/requisitos globais da spec. Dependências entre tarefas existem, mas não medem cobertura de requisitos.
+3. Não há relatório de impacto que relacione requisito alterado com tarefas dependentes, tentativas, roteamentos, workers, checkpoints, gates, evidências e outputs derivados; a revalidação atual é por tarefa e pode marcar evidência velha incompatível, mas não é planejador de mudanças.
+4. `import_plan` troca transacionalmente os digests correntes e força revalidação quando a definição de tarefa com histórico muda; isso protege execução, mas não equivale a um estado explícito de spec proposta/aprovada nem demonstra aprovação do requisito pelo autor informado.
+5. O processo atual exige campos/critério TOML, mas não documenta uma orientação de suficiência proporcional à complexidade nem teste de cobertura requisito→critério→gate/evidência.
+
+Essas lacunas são trabalho documental/planejado; esta consolidação não as declara implementadas. O protótipo ADR e os schemas históricos permanecem preservados.
+
+### Contratos SDD mínimos planejados
+
+- `SpecificationRevision`: `revision_id` estável/único por projeto, sequência monotônica, schema version, snapshot integral canônico, `spec_digest`, revisão anterior e provenance Git quando conhecida; estados proposta/aceita/rejeitada/sucedida e eventos separados. Revisão aceita é imutável.
+- `PlanRevision`: snapshot/digest de `tasks.toml` ligado a uma especificação aceita, schema version, DAG, `RequirementTrace`, cobertura e revisão anterior. Só é aceita com cobertura completa ou adiamentos explícitos aprovados.
+- `RequirementTrace`: link explícito de ID de requisito de `spec.toml` a pares task/criterion em `tasks.toml`; campo TOML candidato `satisfies = ["requirement-id"]`. F7-01 fecha compatibilidade/versionamento; sem inferência textual.
+- `ChangeImpact`: diff semântico e inventário de dependências/artefatos observados, com classificação determinística `unaffected/revalidate/replan/stale/unknown`; incerteza não é considerada ausência de impacto.
+- `RevalidationDecision`/`Replan`: decisão de impacto e novo plano/versionamento, com grant autenticado, motivo, revisões e dispositions. Campo `author` autodeclarado nunca autentica aprovador.
+
+Aceite de requisitos fica exclusivamente em plano de controle humano separado do contexto do agente. Requer principal autenticado e grant de uso único vinculado a revision/plan/impact digests, escopo, operation ID e expiração. Agente não recebe API, token ou credencial de aceite; texto, ferramenta, commit ou saída de agente não constitui autorização. Sem autenticador que comprove presença/consentimento independente, operação de aceite fica indisponível e o fluxo bloqueia.
+
+As revisões globais e locais continuam usando os mecanismos existentes: `Criterion` e seus IDs, `Task`, digests canônicos, `task_definitions`, eventos e operações idempotentes. A evolução deve ocorrer dentro de `.agentflow/spec.toml`/`tasks.toml`; não criar terceiro arquivo versionado. Um TOML antigo sem links continua legível e pode ser operado manualmente, mas seu coverage status é `legacy_unmapped`; roteamento/coordenação que exijam prova integral deve bloquear até migração/aceite explícito.
+
+### Regra de mudança e rastreabilidade
+
+O fluxo planejado é: TOML candidate → parse/validação/DAG → snapshots/digests propostos → ChangeImpact determinístico → autenticação/grant/aceite humano → PlanRevision aceita e cobertura → roteamento/execução → workspace/checkpoint → gates/evidências → conclusão. TOML/SQLite/Git não formam uma transação distribuída: snapshot aceito é fonte operacional imutável; mudança posterior é drift/proposta e não altera a revisão. Toda escrita transacional usa `BEGIN IMMEDIATE`, FKs, `operation_id` e request digest; grant consumido, aceite e eventos são atômicos no DB. Falha/resultado ambíguo requer reconciliação, nunca replay cego. Histórico não é apagado. Evidência incompatível permanece stale e não satisfaz revisão posterior; não existe promoção automática.
+
+Critérios objetivos são IDs estáveis com descrições observáveis, cobertos por evidência declarada/verificada ou quality gate independente. A spec simples permanece concisa (objetivo, restrições indispensáveis, critérios); uma spec complexa detalha pressupostos, interfaces, riscos e dependências conforme impacto. Concisão não autoriza critério ambíguo; detalhe adicional não pode criar requisito oculto fora do TOML aceito.
+
+### Incremento pelas Fases 7–9
+
+F7-01 fecha contratos e versionamento SDD, armazenamento imutável, links de cobertura, ChangeImpact, aceite e compatibilidade. F7 grava classificação, roteamento, budget e mudança de modelo contra a revisão exata. F8 copia identidade/trace links em cada `WorkerAssignment` e bloqueia claim após drift/revalidação requerida. F9 vincula `CoordinationPlan`, `ResultProposal`, revisão independente e integração à mesma revisão; alteração proposta cria nova revisão e novo plano, nunca edita o plano corrente. Migração SQLite após v5 será aditiva, backup-first/rollback-safe; número de schema e tabelas são decididos após inventário no gate F7-01.
+
 ## Fase 1 — Fundação
 
 | ID | Tarefa | Dependências | Critério de aceite |
@@ -31,7 +72,9 @@ Instalação reproduzível com Python 3.11+; `agentflow --version`, `init` e `do
 | 4 — Recuperação e Git | Fase 3 | Reconciliação após interrupção, prevenção de duplicidade, branches e checkpoints explícitos; testes de falha entre transições. |
 | 5 — Validação, Docker e entrega | Fase 4 | Validação independente e quality gates sobre checkpoints imutáveis; runtime Docker opcional, isolamento configurável, builds rastreáveis e plano de entrega sob política explícita; sem deploy automático. |
 | 6 — Ecossistema de agents e contratos de modelo | Fase 5 | Contratos separados `AgentAdapter`, `ProviderDescriptor`, `ModelDescriptor`, `ModelSelection` e `ModelRoutingPolicy`; integrações na prioridade Antigravity → Claude Code → OpenCode → Hermes Agent; sem roteamento, retry ou troca automática nesta fase; sem código/conteúdo do Vibe Coding Toolkit. |
-| 7 — Orquestração inteligente de modelos | Fase 6 | Classificação de complexidade; catálogo versionado; seleção por capacidade/qualidade/custo/latência/risco; escalonamento baseado em evidência; budgets; validação independente; auditoria/métricas; comparação de qualidade; autorização explícita para mudar modelo/provider. |
+| 7 — Intelligent Model Routing | Fase 6 | Classificação de complexidade/risco, escolha explícita sob policy versionada, qualidade/capacidade/custo/latência, budgets rígidos, escalonamento fundamentado em evidência, autorização de mudança de modelo/provider e auditoria. Sem workers concorrentes. |
+| 8 — Worker Orchestration | Fase 7 | Workers persistidos e independentes, scheduler/fila, leases/locks, workspaces isolados e budgets atribuídos; primeiro execução sequencial, depois paralelismo limitado apenas após gate próprio de isolamento, concorrência e recovery. |
+| 9 — Advanced Coordination | Fase 8 | Coordenação de workers especializados, resultados revisáveis, validação independente, integração segura, resolução explícita de conflitos, otimização global e auditoria; concorrência é opção governada, nunca premissa. |
 
 ## Questões e riscos a resolver antes de implementar
 
@@ -278,19 +321,187 @@ O preflight verifica executável, versão, flags e capabilities sem iniciar agen
 9. Toolkit: revisão upstream fixa, lista de arquivos, licenças/proveniência e hashes; integração ausente não acessa rede nem modifica conteúdo.
 10. Homologação: pytest, package smoke, diff check e CI Python 3.11–3.13 em plataformas aprovadas.
 
-## Fase 7 — orquestração inteligente de modelos (futura)
+## Fase 7 — Intelligent Model Routing (implementação local parcial; aprovação real bloqueada)
 
-F7 recebe os contratos da F6 para decidir modelos automaticamente. A implementação depende de aprovação própria e deve incluir:
+### Objetivo e fronteira
 
-1. Classificador de complexidade com versão, evidências de classificação e opção de override manual.
-2. Catálogo versionado e auditável de providers/modelos, capabilities, disponibilidade, custo e latência, fixado por versão/digest do pacote ou de `spec.toml`.
-3. Seleção por capability, qualidade observada, custo, latência e risco: modelos econômicos para tarefas simples, intermediários para implementação convencional e avançados para planejamento, arquitetura, revisão crítica e problemas complexos.
-4. Budgets hard para custo, tokens, tempo e tentativas; previsão vs. consumo real e bloqueio ao atingir limites.
-5. Escalonamento somente quando validação independente provar que critérios verificáveis não foram satisfeitos por insuficiência do modelo; falhas de ambiente/auth/quota/infra não escalam.
-6. Escalonamento cria nova tentativa/seleção auditável; não repete tentativa com efeito desconhecido, preserva checkpoint/workspace e exige reconciliação conservadora.
-7. Autorização explícita e versionada para troca de modelo/provider, com controles para seleção manual, consentimento e limites de policy; sem autorização da operação, a seleção não muda.
-8. Validação independente permanece separada e não pode ser substituída por autoavaliação do modelo.
-9. Auditoria, métricas, comparação controlada de qualidade/custo/latência e testes de regressão por tarefa/modelo.
-10. CI, segurança, recovery e homologação da matriz de providers/plataformas autorizada: Python 3.11, 3.12 e 3.13 em Linux e Windows.
+F7 decide qual `ModelSelection` será proposta para uma tentativa de tarefa executada pelo fluxo F3–F6. Usa `AgentAdapter`, `ProviderDescriptor`, `ModelDescriptor`, `ModelSelection` e o schema inerte de `ModelRoutingPolicy` existentes; não cria workers, filas concorrentes ou execução paralela. `ModelRoutingPolicy` deixa de ser inerte somente nesta fase e somente após receber avaliação versionada e autorização explícita. A decisão de roteamento não executa, valida nem conclui a tarefa.
 
-F7 não é autorizado por este planejamento; nenhum componente de roteamento automático será implementado na Fase 6.
+O classificador avalia complexidade e risco a partir de sinais documentados da tarefa, seus critérios e histórico verificável. A saída é um registro versionado com classe, confiança, fatores, evidências, versão/digest do classificador e eventual override humano. Baixa confiança, dados insuficientes ou sinais conflitantes levam a seleção manual/pausa, nunca a escolha otimista. Modelos econômicos são candidatos para tarefas simples; intermediários para implementação convencional; avançados para planejamento, arquitetura, revisão crítica e tarefas complexas/de alto risco. A seleção ainda precisa satisfazer capabilities obrigatórias e compatibilidade do adapter.
+
+A ordenação de candidatos pode considerar qualidade observada em avaliações independentes e comparáveis, latência histórica recente, preço com moeda/unidade/fonte e risco operacional. Catálogo e métricas têm timestamp, proveniência, validade e digest; preço, capacidade ou disponibilidade ausente/stale não é inventado. Catálogo-base pode ser distribuído com o pacote AgentFlow; overrides do projeto devem respeitar ADR 0002 e ficar em `.agentflow/spec.toml`, enquanto observações e seleções operacionais ficam em SQLite. Migração v5→v6 é esperada para os novos snapshots/ledger, aditiva, backup-first e rollback-safe; F7-01 confirma a versão real após inventário.
+
+### Budgets, autorização e escalonamento
+
+Budgets por tarefa, tentativa e execução registram custo/moeda, tokens, tempo e tentativas. Cada dimensão é `applied_verified` (mecanismo efetivo mais evidência), `estimated` (projeção sem garantia) ou `unavailable` (sem dado/controle confiável). Reservas transacionais impedem AgentFlow de admitir mais que o saldo contabilizado, mas não limitam por si só a fatura do provider. Policy de hard monetary cap exige upper bound verificável e capacidade de containment; caso contrário bloqueia spawn. Estimativa só pode ser usada com autorização explícita para cenário indicativo e nunca descrita como hard cap. Usage/fatura final incerto bloqueia gasto adicional que possa exceder o restante reconciliado. Workers futuros herdam budgets alocados (F8).
+
+Seleção inicial pode ser automática apenas dentro de policy ativa, catálogo fixado e budgets autorizados. A escolha manual continua disponível. Qualquer alteração de modelo ou provider entre tentativas exige autorização explícita vinculada à tarefa/revisão, modelo/provider de destino, motivo, teto de custo/tempo/tokens, policy/catalog digest e expiração. Autorização genérica não autoriza fornecedor diferente. Sem autorização, a tentativa não muda. Escalonamento exige evidência verificada de que critérios objetivos não foram satisfeitos por insuficiência do modelo; falha de ambiente, autenticação, quota, infraestrutura, processo, timeout ou resultado desconhecido exclui escalonamento automático.
+
+Escalonar significa propor e autorizar uma nova tentativa, não repetir a tentativa anterior. Tentativa desconhecida, interrupção, efeito externo incerto ou workspace não reconciliado bloqueiam toda nova execução até reconciliação humana e determinística. O checkpoint Git F4 e snapshot/resultado de validação F5 permanecem vinculados à revisão/tentativa original. Evidências de outro checkpoint, definição, modelo ou validador não podem ser reutilizadas. Resultado de modelo, código de saída e autoclassificação não substituem validação independente nem conclusão.
+
+### Ordem planejada F7-01 a F7-10
+
+| ID | Tarefa | Dependências | Entregáveis | Critérios de aceite e testes |
+| --- | --- | --- | --- | --- |
+| F7-01 | Fechar contratos SDD, autoridade humana e gate de implementação | F1–F6 | ADR 0008; contrato WebAuthn/FIDO2, enrollment, broker/UI/IPC trust boundary, armazenamento público, threat model; inventário SQLite v5/TOML e plano de migração v6. | `userVerification=required`, challenge/origin/RP/flags verificados; UI mostra resumo confiável de toda a transação; grant scoped/one-use/revocable/short-lived; agente não alcança credenciais, UI, broker ou store; ausência de qualquer capability bloqueia. **Gate atual não satisfeito:** runtime same-user não comprova separação; registrar bloqueio e não iniciar F7-02 a F7-10 antes de homologar broker isolado em Windows/Linux. Migração v6 só é aplicada depois desse gate. |
+| F7-02 | Persistir `SpecificationRevision`, `PlanRevision`, ChangeImpact, decisão e eventos | F7-01 | Migração SQLite v6 aditiva, backup-first e rollback-safe; snapshots imutáveis; idempotência por `operation_id`. | Import/reopen cria proposta, nunca aceita; mesma operação/digest retorna registro; digest divergente conflita; crash antes/depois do commit recupera determinística; FK/integrity e abertura v5 preservam bytes/dados/histórico; testes transacionais, concorrência multi-processo e migration rollback. |
+| F7-03 | Evoluir schemas TOML com RequirementTrace, cobertura e replan | F7-01, F7-02 | Schema compatível para vínculo requisito→task criterion; relatório de cobertura; diff semântico e `ChangeImpact`; fluxo explícito `RevalidationDecision`/`Replan`. | Referências, ciclos e critérios ambíguos falham; critérios sem cobertura bloqueiam aceitação salvo adiamento explícito; mudanças computam descendentes e artefatos afetados deterministamente; arquivos legados abrem como `legacy_unmapped` e não ganham cobertura presumida; regressões de leitura/migração/round-trip TOML. |
+| F7-04 | Criar catálogo versionado e prova de capabilities | F7-01, F6 | `ModelCatalogSnapshot`, `ProviderCapabilityEvidence`, provenance, expiração e catálogo base; diferenciar advertised/observed/enforced. | Identidade provider/model/version e source/validity/digest fixos; capability é `supported/unsupported/unknown`; dado stale/ausente vira unknown; teste de aliases, mudanças de catálogo, versões não homologadas, capacidade anunciada sem prova e provider indisponível. |
+| F7-05 | Implementar classificador e evaluator determinístico de seleção | F7-03, F7-04, F5 | `TaskClassification`, política de tier/capability, critérios independentes de qualidade/custo/latência/risco e `ModelRoutingDecision`. | Mesmas revisões/snapshots geram mesma saída; baixo confidence/conflicto/informação insuficiente exige manual/bloqueia; tarefas simples podem escolher econômico, implementação intermediário, planejamento/revisão crítica exigem tier/capabilities mínimos; métricas vêm de validação F5 comparável; desconhecido nunca pontua como favorável; testes property/golden e sem executar agentes. |
+| F7-06 | Implementar budgets por tarefa/tentativa/execução e ledger | F7-02, F7-04 | `BudgetEnvelope`, reserva, consumo, reconciliação, dimensão/capacidade de enforcement e provenance. | Atomicidade impede alocação AgentFlow além do saldo sob concorrência; cada limite marca `applied_verified`, `estimated` ou `unavailable`; hard financial cap bloqueia quando worst-case não puder ser provado/contido; estimativa não é reportada como enforcement; limites de tempo/tentativa testados; billing final unknown bloqueia gasto adicional; testes crash/reopen/concorrência e arredondamento/moeda. |
+| F7-07 | Implementar grants de roteamento e autorização de troca de modelo/provider | F7-01, F7-05, F7-06 | `RoutingAuthorization` e `ModelChangeAuthorization`; snapshot de seleção manual/automática por tentativa. | Grant autenticado liga de/para, revisão/requisitos, impact/evidence, budget, expiração e operation ID; agente não tem grant/API/secret; mudança sem autorização bloqueia; consumo de grant é atômico e não repetível; testes de adulteração, replay, identidade e revogação. |
+| F7-08 | Integrar escalation por evidência e recovery conservador | F7-05 a F7-07, F3, F5 | Taxonomia causal, `EscalationEvidence`, proposta de próxima tentativa e reconciliação. | Só falha objetiva F5 atribuível a insuficiência pode propor escalonamento; ambiente/auth/quota/infra/process/timeout/unknown não escalonam; execução anterior precisa terminal/reconciled; novo attempt ID, checkpoint e budget cumulativo; aprovação explícita; simulações de crash/resultado externo desconhecido nunca fazem replay. |
+| F7-09 | Completar auditoria, inspeção, compatibilidade e regressões | F7-02 a F7-08 | `agentflow audit --format human|json` read-only para revisões/digests, cobertura, impacto, catálogo/capabilities, decisões, budgets/ledger, propostas, evidências e pendências. | JSON/humano; `mode=ro&immutable=1`; recusa WAL; nunca migra/escreve, executa provider ou toca grants; omite snapshots textuais, payloads e logs; verifica digests/links e sinaliza divergências; testes de banco byte-identical, segredo sentinela, WAL, esquema antigo e CLI. |
+| F7-10 | Homologar matriz de segurança, plataformas, pacote e CI | F7-01 a F7-09 | Release candidate documental, suíte integral, build/instalação e CI. | Todos os contratos/estados/budgets/autorização testados em Windows e Linux, Python 3.11, 3.12 e 3.13; nenhum agente real necessário na CI; Codex/adapters anteriores regressivos; sem workers paralelos; falha em qualquer plataforma impede aprovação. |
+
+### Entrada e gate de saída F7
+
+Entrada: F6 integrada e homologada; SQLite v5 e TOML inventariados; F5 oferece evidências verificadas; broker/authenticator comprova ação independente e a interface/control plane não pode ser controlada pelo runtime agente. **Estado atual: bloqueada em F7-01; tarefas F7-02–F7-10 não iniciadas.** Após o gate, saída exige revisions/coverage SDD aceitos, seleção auditável, capabilities comprovadas, budgets sem alegar enforcement falso e escalation somente por evidência/grant. Sem limite financeiro verificável, hard-cap policy recusa o provider. F7 permanece serial, sem workers paralelos.
+
+### Atualização de execução controlada
+
+A autorização local subsequente permite somente um facade de autoridade sempre indisponível e os componentes independentes de grant. Isso **não satisfaz a condição de entrada** acima: F7-01 permanece bloqueada quanto à fronteira confiável, enrollment, IPC e consentimento real. O trabalho local parcial implementa schema TOML tasks v4, migração SQLite v6 aditiva, propostas imutáveis/idempotentes, catálogo com capabilities verificadas separadas de claims, classificação determinística e avaliação somente preview. Não há aceite de revisão, troca de provider/modelo, escalonamento, retry, dispatch por policy ou execução de agentes.
+
+| Tarefa | Estado local após autorização controlada |
+| --- | --- |
+| F7-01 | Contratos e facade fail-closed presentes; homologação de broker/WebAuthn/UI/IPC e isolamento ainda bloqueada. |
+| F7-02 | Propostas SDD/ChangeImpact e migração v6 implementadas; aceite por grant permanece desabilitado. |
+| F7-03 | Schema tasks v4, `satisfies`, adiamentos explícitos e compatibilidade legada implementados. Replan/aceite ainda não executáveis. |
+| F7-04 | Snapshot versionado e proveniência de capability implementados; verificação real dos providers permanece externa/desconhecida. |
+| F7-05 | Classificador e evaluator determinísticos em modo preview; sem dispatch ou fallback. |
+| F7-06 | Apenas avaliação estimada/unavailable de budgets no preview; ledger/reserva e hard enforcement não implementados. |
+| F7-07 | Não implementada além do contrato `ApprovalAuthority`; grants reais bloqueados. |
+| F7-08 | Não implementada; sem escalonamento/retry. |
+| F7-09 | Resumo de auditoria read-only no store; CLI completa ainda pendente. |
+| F7-10 | Pendente da suíte local final, instalação e matriz remota Windows/Linux. |
+
+### Continuação local sem autoridade real — atualização
+
+Uma autorização posterior permite completar somente os componentes que não dependem de concessão real. O gate de grants permanece bloqueado; essa exceção não habilita aceitação de revisões, troca de provider/modelo, despacho ou retry.
+
+| Tarefa | Estado após continuação controlada | Evidência/limite |
+| --- | --- | --- |
+| F7-01 | Parcial; **gate de confiança bloqueado** | Facade segue `approval_unavailable`. ADR 0008 agora define plano de broker remoto/domínio separado; sem serviço, UI, WebAuthn ou prova de isolamento real. |
+| F7-02 | Implementada localmente | Revisões/propostas SDD persistidas e imutáveis, idempotentes; schema v6 preservado. Aceite continua bloqueado. |
+| F7-03 | Implementada no subconjunto versionável | TOML tasks v4, cobertura/defer explícitos; compatibilidade v1–v3. Fluxo de aceite/revalidation que exija consentimento não está ativo. |
+| F7-04 | Implementada como catálogo versionado | Snapshots/capabilities e proveniência; capability não verificada permanece desconhecida. |
+| F7-05 | Implementada como evaluator preview | Classificação determinística e decisão auditável persistida com snapshots exatos da especificação, policy, catálogo, budget e alternativas; `dispatch_allowed=false` invariável. |
+| F7-06 | Implementada como ledger local transacional | Migração aditiva v7; contas execution/task/attempt, reserva idempotente, ledger append-only, reconciliação parcial/conhecida/estimada/desconhecida, concorrência e recovery conservador. `applied_verified` descreve somente o limite que o ledger local consegue aplicar; enforcement de fatura/provider permanece unavailable. |
+| F7-07 | Bloqueada | Nenhum grant real; autoridade continua fail-closed. |
+| F7-08 | Proposta persistente, execução bloqueada | Proposta requer falha F5 verificável, checkpoint/revisão/model identity/capability/custo válidos, traz evidências, delta estimado, expiração e idempotência; não chama runtime e requer grant independente. |
+| F7-09 | Implementada localmente no escopo sem autoridade | CLI `agentflow audit` humana/JSON cobre revisões/digests, cobertura, impactos, catálogo, preview, budgets/ledger, escalonamento, evidências e pendências; somente leitura, sem secrets e sem adapters. |
+| F7-10 | Pendente de homologação | Aguarda suíte completa, smoke, diff-check e, em etapa remota autorizada, CI Windows/Linux e Python 3.11–3.13. |
+
+SQLite permanece compatível com as fases anteriores: v6 SDD/catalog fica inalterado; v7 é migração aditiva para snapshots completos de roteamento, ledger/reservas e propostas de escalonamento. Migração e rollback são cobertos por bancos temporários/testes; nenhum banco operacional existente foi aberto ou modificado nesta continuação. O despacho automático continua ausente.
+
+F7-09 foi concluída localmente para inspeção. Se houver WAL pendente, o comando recusa leitura: o modo immutable omitiría commits ainda no WAL, e uma leitura WAL normal poderia criar sidecars. A CLI pede que escritores sejam encerrados e o checkpoint operacional seja feito por fluxo próprio; não o executa.
+
+## Fase 8 — Worker Orchestration (planejada; não implementada)
+
+### Modelo e contratos dos workers
+
+Worker é uma identidade de execução persistida; não é agente, provider, modelo, tarefa ou processo. Entidades separadas se relacionam por snapshots e FKs: `WorkerDefinition` (ID/versão/capabilities/role), `WorkerIdentity` (ID estável e geração/fencing token), `WorkerAssignment` (task ID/revisão, `attempt_id`, adapter/agent, `ModelSelection`, workspace, budget e operation IDs), `WorkerState`/`WorkerEvent` (estado e auditoria append-only), `WorkerLease` (owner, heartbeat, expiração e fencing token), `WorkerScope` (escopo de paths/recursos autorizado) e `WorkerResult` (execução, validação, evidências e checkpoint referenciados). Snapshots de assignment e policy são imutáveis; segredo, credencial ou conteúdo de log integral não entra no registro.
+
+O ciclo de vida do worker (`queued`, `claimed`, `provisioning`, `ready`, `active`, `cancelling`, `recovering`, `quiescent`, terminal) não substitui estados independentes de processo, validação, checkpoint e tarefa. Scheduler persiste a intenção/assignment antes de provisionar e avança por transações curtas; subprocessos nunca rodam dentro da transação SQLite. `operation_id` e digest vinculam enfileirar, claim, heartbeat, cancelamento e recuperação; mesmo ID com parâmetros diferentes conflita. Repetição de chamada idempotente não reexecuta spawn/Git.
+
+Cada assignment recebe workspace/worktree Git própria, branch própria e escopo autorizado da revisão segundo F4. Checkout original permanece intacto. Worker não altera branch/ref de outro workspace; checkpoint é feito somente com pathset explícito e revalidado, index isolado e integridade verificada. Worker sem mudança versionada ainda precisa deixar resultado/evidência auditáveis. Conclusão exige evidências F5 vinculadas à mesma revisão/checkpoint, nunca sucesso do worker/processo/commit isoladamente.
+
+### Scheduler, filas, locks e recuperação
+
+A primeira etapa suporta workers independentes em execução sequencial: fila persistida, claims transacionais, ordenação determinística por prioridade declarada/dependências e um worker ativo por projeto. Prioridade não muda dependências nem pode causar starvation sem política explícita. O scheduler revalida tarefa `ready`, plano/revisão, autorização, budget global/local, capabilities, escopo e workspace antes de cada claim/spawn. Nenhuma tarefa é executada apenas por estar enfileirada; início requer solicitação/policy explícita aprovada.
+
+Heartbeat e lease indicam liveness, não prova de término. Lease inclui geração monotônica/fencing token para que dono obsoleto não grave resultados após reassignment; timeout de lease nunca autoriza matar processo por PID isolado nem assumir que worker morreu. Reclaim exige verificar identidade do processo (F3), lock/owner (F4), workspace, tentativa e eventos. Se estado ou efeito for ambíguo, assignment fica bloqueado para reconciliação; nunca se reexecuta. Pai encerrado, rede local indisponível ou heartbeat atrasado não convertem resultado em sucesso/falha.
+
+Paralelismo controlado é uma segunda etapa separada e permanece desativado até homologação do isolamento, locks interprocesso, fencing, limites, cancelamento, recovery e concorrência em Windows/Linux. O scheduler pode ativá-lo apenas para scopes versionados explicitamente disjuntos; pathsets desconhecidos ou sobrepostos colidem e são serializados/bloqueados. Dependências sempre prevalecem. Recursos e custo de cada worker são envelopes reservados atomicamente do budget global. Limite de concorrência por projeto/provider/host é explícito; default 1. Git continua somente local; integração de resultados não pode executar operação remota ou fora do workspace.
+
+### Etapas e tarefas planejadas F8-01 a F8-10
+
+**Etapa A — workers sequenciais independentes (F8-01 a F8-07).**
+
+| ID | Tarefa | Dependências | Critério de aceite verificável |
+| --- | --- | --- | --- |
+| F8-01 | Fechar ADR F8: identidade, estados, prioridade, liveness, locks, quotas, scopes e recuperação | F1–F7 | Parâmetros numéricos, owner/fencing, expiração, retenção e critérios de ambiguidade definidos por plataforma; nenhum lease expirado implica retry ou kill automático. |
+| F8-02 | Versionar contratos e snapshots Worker/Assignment/Scope/Budget | F8-01 | Contratos distinguem worker, tarefa, agent, provider/model, workspace e processo; cada assignment referencia `SpecificationRevision`, `PlanRevision` e requirement/criterion IDs; snapshots/digests imutáveis e compatibilidade legada testáveis. |
+| F8-03 | Definir persistência e migração SQLite para fila, eventos, lease e budget | F8-02 | Migração posterior ao schema existente é aditiva, backup-first, transacional/rollback-safe, FKs íntegras, append-only auditável e abertura de bancos anteriores não reinterpreta histórico. |
+| F8-04 | Provisionar workspace/branch própria via `GitProvider` F4 | F8-02, F8-03 | Um assignment tem raiz/branch/base isoladas verificadas; nenhuma escrita no checkout original ou fora do workspace; IDs e operation_id idempotentes. |
+| F8-05 | Implementar fila e scheduler sequencial determinístico | F8-03, F8-04 | Dependências/status/budgets/capabilities são revalidados no claim; só uma execução ativa por projeto; concorrência multi-processo não duplica worker nem tentativa. |
+| F8-06 | Implementar heartbeat, lease, fencing, cancelamento e recovery | F8-05, F3, F4 | Dono obsoleto não grava; PID reutilizado não é adotado/morto; crash nas janelas SQLite/spawn/Git torna assignment inconclusivo e reconciliação repetida é idempotente sem replay. |
+| F8-07 | Vincular worker a resultado, validação, evidência e checkpoint | F8-04 a F8-06, F5 | Execução, validação e conclusão permanecem estados distintos; resultado rastreia assignment, revisão/plano/requisitos, checkpoint e gates; evidências têm revisão/checkpoint correto; tarefa sem evidência verificada ou checkpoint exigido não conclui. |
+
+**Etapa B — paralelismo controlado (F8-08 a F8-10).**
+
+| ID | Tarefa | Dependências | Critério de aceite verificável |
+| --- | --- | --- | --- |
+| F8-08 | Homologar isolamento, scopes, locks, budgets e recovery sob concorrência | F8-01 a F8-07 | Testes interprocesso Windows/Linux injetam crash/atraso/PID reuse; sem corrupção de DB, escrita fora de worktree, duplicação, orçamento excedido ou conclusão prematura. Falha mantém paralelismo desativado. |
+| F8-09 | Implementar execução paralela opt-in com limites por projeto/provider/host | F8-08 | Default continua 1; apenas scopes explicitamente disjuntos simultâneos; conflito/escopo desconhecido serializa; quotas globais reservadas atomicamente; cancelamento não mata workers alheios. |
+| F8-10 | Homologar pacote, regressões, CI e rollout gradual | F8-01 a F8-09 | Sequencial permanece funcional e padrão; paralelismo ativável somente com gate F8-08 aprovado e configuração explícita; matriz, migração, recovery e métricas comprovam todos os limites. |
+
+Entrada: F7 homologada; F3/F4/F5 preservadas e cobertas por regressões; políticas de custo do F7 transacionáveis. Saída da Etapa A não habilita paralelismo. Paralelismo é liberado apenas depois do gate F8-08; se não houver prova de isolamento/scope ou suporte de plataforma, aquele runtime permanece limitado à execução sequencial.
+
+## Fase 9 — Advanced Coordination (planejada; não implementada)
+
+F9 coordena resultados de workers especializados e mantém explícita a distinção entre decomposição, execução, revisão, integração, validação e conclusão. Pode executar especialistas em sequência. Paralelismo é herdado apenas se F8-08/09 tiverem sido homologados e habilitados; F9 não exige simultaneidade.
+
+Contratos planejados: `WorkerRoleDescriptor` (função, versão, capabilities e limites, sem conflar com agent/model), `CoordinationPlan` (DAG versionado de etapas/atribuições e dependencies), `ResultProposal` (checkpoint/pathset/evidências/snapshot e worker de origem), `ReviewDecision` (revisor independente, criteria/digest/resultado), `IntegrationPlan` (base, checkpoints de entrada, escopos, autorização/operation_id) e `ConflictRecord` (paths/blobs conflitantes, causa, opções e decisão auditável). Propostas não alteram plano/TOML ou Git até aprovação e operação local gerenciada F4. Um agente não pode aprovar sua própria alteração; critérios de qualidade continuam em F5.
+
+Planejamento pode decompor tarefas e recomendar dependências/prioridades, mas mutações à spec/tasks necessitam revisão/revalidação segundo F2. Workers de implementação ficam em worktrees/branches separados e recebem `WorkerScope`; worker de revisão lê checkpoint imutável e não escreve nele. Integração ocorre somente por operação AgentFlow autorizada, em workspace destino próprio, usando commits/checkpoints verificados, pathset explícito e validação independente no resultado integrado. Conflito é estado explícito; o sistema apresenta alternativas/evidências e aguarda decisão autorizada, sem escolher “vencedor”, rebase ou descarte silenciosamente. Nenhuma operação Git remota é parte de F9.
+
+O otimizador global compara custo, qualidade, latência, risco e budgets de forma auditável. Prioriza qualidade dos critérios e limites duros; não pode trocar provider/modelo sem autorização F7, aumentar concorrência sem F8, ampliar permissões ou consumir orçamento não alocado. Métricas agregadas preservam proveniência e minimizam conteúdo sensível. Resultado incerto mantém coordenação bloqueada até reconciliação; nenhum resultado parcial vira conclusão de projeto.
+
+| ID | Tarefa | Dependências | Critério de aceite verificável |
+| --- | --- | --- | --- |
+| F9-01 | Fechar ADR F9: papéis, ownership, aprovações, integração e política de conflito | F1–F8 | Decide autoridade por transição, limite de autoaprovação, versão dos contratos e casos de paralelismo; nenhuma etapa ambígua pode editar ou integrar automaticamente. |
+| F9-02 | Definir roles especializadas e capability/permission profiles | F9-01, F6 | Roles são independentes de agent/provider/model; capabilities/permissões mínimas exigidas, incompatibilidades e versões verificadas; sem ampliação de acesso. |
+| F9-03 | Criar `CoordinationPlan` DAG e dependências entre propostas de trabalho | F9-01, F8-02 | IDs estáveis, `SpecificationRevision`/`PlanRevision`, requisito(s) e snapshots/digest rastreados; ciclos/ref inválida recusados; plano só agenda tarefas aprovadas e respeita DAG original. |
+| F9-04 | Implementar interface de planejamento/decomposição como propostas | F9-02, F9-03 | Propostas incluem rationale/criteria/risco; não modificam TOML, estado de tarefa ou autorização sem revalidação explícita. |
+| F9-05 | Definir envelopes de resultados e checkpoints por worker | F9-02, F8-07 | Cada output referencia specification/plan/task revisions, requirement/criterion IDs, worker/workspace/checkpoint/pathset, evidências e digests; material ausente ou stale é rejeitado. |
+| F9-06 | Implementar review independente e quality gates do resultado | F9-05, F5, F7 | Worker autor não valida sua própria alteração; gate aponta para snapshot/checkpoint exato; `failed/inconclusive/not_run` bloqueiam integração/conclusão. |
+| F9-07 | Definir e detectar conflitos entre escopos e alterações | F9-03, F9-05, F4 | Detecção determinística por base/tree/path e locks; sobreposição desconhecida conflita; dados originais preservados até decisão. |
+| F9-08 | Implementar `IntegrationPlan`, resolução autorizada e reconciliação | F9-06, F9-07 | Integração local somente em workspace separado, por pathset e operation_id explícitos; conflito exige escolha auditada; crash não duplica ou descarta commits. |
+| F9-09 | Implementar orçamento/otimização global e observabilidade distribuída | F7, F8, F9-03 a F9-08 | Alocação respeita saldo transacional e concorrência habilitada; métricas atribuem custo/qualidade/latência/risco por execução; nenhum limite é excedido. |
+| F9-10 | Homologar coordenação, regressões, compatibilidade e rollout | F9-01 a F9-09 | Cenários sequenciais e paralelos autorizados passam em crash/reopen/ambiguidade; requirement-to-result trace e invalidação stale passam; migrations/old projects e Codex/adapters legados continuam compatíveis; CI aprovada. |
+
+Entrada: F7 homologada; F8 Etapa A concluída e, para qualquer paralelismo, F8-08/09 aprovadas; F4 continua impedindo operações Git remotas e alterações fora de workspaces; F5 mantém validação independente. Saída: coordenação auditável e reversível somente mediante novas operações explícitas, com integração de resultados verificados e conflitos resolvidos por decisão autorizada.
+
+### Riscos e decisões arquiteturais ainda pendentes para F7–F9
+
+- Qualidade comparável entre modelos depende de tarefas/suites representativas, versões fixas, validação independente e política de privacidade; avaliações históricas podem ter viés e pouca amostra.
+- Providers podem ocultar preço, tokens efetivos, retries internos, limites, latência ou identidade; um hard budget não é garantível sem teto de consumo controlável. Política deve recusar a opção quando o teto não puder ser reservado/forçado.
+- Classificador pode subestimar risco/complexidade ou expor dados; features, limiar de confiança, explicabilidade e possibilidade de classificação assistida são decisões do ADR F7.
+- F7-01/F7-06 precisam fixar moeda de contabilização, fontes/timestamp de câmbio, credits/prepaid e reconciliação; estimativas nunca satisfazem hard caps.
+- F8 precisa fixar números de workers por host/projeto/provider, duração/heartbeat de leases, fairness/starvation, escalonamento de prioridade, fencing e quotas por plataforma. Expiração nunca prova término.
+- Worktree Git isola checkout/branch, mas não o filesystem/processo sob o mesmo usuário. Scope pathset não é sandbox; perfis que exigem isolamento forte precisam runtime capaz de provar enforcement ou permanecem indisponíveis.
+- Paralelismo depende de bloquear escopos sobrepostos; imports/builds podem alterar arquivos globais ou compartilhados além de pathsets. Se writes indiretas não forem confináveis, tarefas devem ser serializadas.
+- F9 precisa decidir estratégia de integração local (commits escolhidos, patch/bundle ou cherry-pick gerenciado) sem contrariar o ADR 0004; não presumir que Git merge/rebase fica permitido.
+- Autenticação independente de aprovador depende de provider/UI por plataforma; se prova de identidade e consentimento fora do agente não estiver disponível, aceite fica bloqueado, sem fallback para `author` autodeclarado.
+- Migrações futuras precisam manter leitura de bancos F1–F6, triggers append-only, backups e recovery; não se fixa antecipadamente o próximo schema version até inventário técnico e ADR da fase.
+
+Este roadmap não autoriza implementação de F7, F8 ou F9. Cada fase exige revisão arquitetural/ADR e autorização próprias; F9 depende dos gates reais de F7/F8, não de suposição de paralelismo.
+
+### Matriz de testes futura F7–F9
+
+| Fase | Camada | Cenários mínimos de aceite |
+| --- | --- | --- |
+| F7 | Classificação/catálogo | Mesmo snapshot gera mesma decisão; confiança baixa, capability ausente, catálogo stale e dados de preço/latência desconhecidos bloqueiam ou pedem override explícito; digest/version mismatch invalida decisão. |
+| F7 | Budget/autorização | Reservas concorrentes não excedem teto; falha pré-spawn reverte reserva conforme operação; custo posterior é reconciliado; uso/preço desconhecido bloqueia próxima tentativa; provider/modelo diferente sem consentimento exato falha. |
+| F7 | Escalonamento/recuperação | Evidência F5 de critério falho por insuficiência pode propor nova tentativa autorizada; erro de ambiente/auth/quota/infra, timeout ou resultado desconhecido não escala nem repete; checkpoint antigo permanece associado à tentativa antiga. |
+| F7 | Regressão/qualidade | Suites independentes e versionadas comparam modelos sem usar autoclassificação como aprovação; Codex e seleção manual continuam funcionando; policies/TOMLs anteriores permanecem legíveis. |
+| F8 | Identidade/queue/lease | Assignment e `operation_id` idempotentes; parâmetros divergentes conflitam; DAG/priority determinística; lease expiry, heartbeat atrasado, PID reuse, dono antigo e crash não provocam claim/spawn duplicado. |
+| F8 | Workspaces/scopes | Cada worker usa workspace/branch própria; checkout original inalterado; traversal, symlink escape, scope vazio/unknown, paths sobrepostos e submódulos são bloqueados/serializados; staging continua allowlist F4. |
+| F8 | Concorrência/recovery | Etapa sequencial garante um ativo por projeto; testes interprocesso Linux/Windows exercitam fencing, budget agregado, cancelamento de um worker sem atingir outro, falha entre SQLite/spawn/Git e reabertura repetida. Qualquer violação mantém paralelismo desativado. |
+| F8 | Limites/plataforma | CPU/memória/processos/tempo/logs/armazenamento reportados por capacidade efetiva; recurso não aplicável fica indisponível e policy obrigatória recusa; matriz Python/plataforma e smoke de pacote passam. |
+| F9 | Coordenação/revisão | DAG sem ciclo; worker não atualiza spec/tasks sem revalidação; implementação e revisão são identidades/assignments diferentes; autor não aprova o próprio checkpoint; evidência stale ou validator inativo não libera integração. |
+| F9 | Conflito/integração | Propostas baseadas em checkpoints verificados; conflito de path/blob e conflito semântico exercitados; integração usa destino isolado/pathset explícito; operação ambígua não repete; decisão humana/auditoria preservadas; nenhuma operação remota. |
+| F9 | Orçamento/auditoria/regressão | Limite global respeitado sequencialmente e em paralelismo homologado; custos atribuídos por worker/model/attempt; logs sanitizados; reabertura/recovery preservam events, checkpoints, autorização e dados F1–F8. |
+| F7 | Autorização Windows/Linux | Grant ligado a digest/impact/escopo, identidade verificada e uso único; ausência de provider que comprove a ação humana fora do agente bloqueia aceite/troca. |
+| F7 | Matriz de versões | Suíte, migração, pacote e CLI passam em Windows/Linux com Python 3.11, 3.12 e 3.13; falha em qualquer combinação bloqueia homologação. |
+| F7 | Capacidade e limites de provider | Fixtures separam capability anunciada/observada/enforced; unknown não satisfaz policy; hard cap sem worst-case controlado bloqueia execução; estimates permanecem não vinculantes. |
+
+| SDD/F7 | Propor, comparar e aceitar revisão de spec/plano; falha de persistência durante aceite | Snapshot/digest e eventos são atômicos; revisão aceita é append-only; falha não ativa a proposta parcialmente. |
+| SDD/F7 | Abrir TOML legado sem `satisfies`, adicionar referência inválida ou critério sem cobertura | Legado carrega como `legacy_unmapped`; referência inválida falha; plano estrito não é aceito sem cobertura ou deferred rationale auditável. |
+| SDD/F7 | Alterar requisito, critério, tarefa ou dependência e calcular impacto transitivo | Mesmo input/revisões gera ChangeImpact idêntico; dependentes e artefatos afetados aparecem sem apagar histórico. |
+| SDD/F7 | Reabrir projeto com arquivos TOML diferentes da revisão aceita | Estado vira proposta/drift pendente; não há aceite, execução ou roteamento silencioso; histórico anterior permanece íntegro. |
+| SDD/F7 | Reutilizar evidência de revisão/checkpoint/gate diferente | Evidência não satisfaz critério atual; decisão de revalidação exige evento explícito e não muda o resultado histórico. |
+| SDD/F7–F8 | Criar routing decision ou WorkerAssignment a partir de revisão não aceita ou stale | Operação é recusada; assignment persistido contém os IDs exatos de revisão/plano/requisitos. |
+| SDD/F8–F9 | Propagar requisito até tentativa, worker, workspace, checkpoint, gate e resultado | Consulta de rastreabilidade reconstrói a cadeia por IDs/digests e identifica elo ausente sem inferir por texto. |
+| SDD/F9 | Propor alteração de spec/tasks em decomposição ou integração | Proposta não altera definição ativa; requer ChangeImpact, replanejamento e aceite antes de nova execução. |

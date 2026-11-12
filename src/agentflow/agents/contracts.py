@@ -1,7 +1,10 @@
 """Agent-independent execution contracts."""
 
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
+import re
 from typing import Protocol
 
 from .selection import ModelSelectionRequest, ModelSelectionObservation
@@ -103,6 +106,111 @@ class AgentResult:
 class AgentAdapter(Protocol):
     def prepare(self, request: ExecutionRequest) -> ProcessSpec: ...
     def interpret(self, result: ProcessResult) -> AgentResult: ...
+
+
+class NormalizedAgentState(str, Enum):
+    CREATED = "created"
+    READY = "ready"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+
+def normalize_execution_state(status: str) -> NormalizedAgentState:
+    """Map AgentFlow process/store states without treating ambiguity as failure/success."""
+    if type(status) is not str:
+        raise ExecutionError("estado de execução inválido")
+    mapping = {
+        "created": NormalizedAgentState.CREATED,
+        "prepared": NormalizedAgentState.READY,
+        "pending": NormalizedAgentState.READY,
+        "running": NormalizedAgentState.RUNNING,
+        "process_succeeded": NormalizedAgentState.SUCCEEDED,
+        "succeeded": NormalizedAgentState.SUCCEEDED,
+        "process_failed": NormalizedAgentState.FAILED,
+        "failed": NormalizedAgentState.FAILED,
+        "cancelled": NormalizedAgentState.CANCELLED,
+        "timed_out": NormalizedAgentState.UNKNOWN,
+        "interrupted": NormalizedAgentState.UNKNOWN,
+        "unknown": NormalizedAgentState.UNKNOWN,
+    }
+    return mapping.get(status, NormalizedAgentState.UNKNOWN)
+
+
+@dataclass(frozen=True)
+class AgentAvailability:
+    adapter_id: str
+    status: str
+    executable: str
+    version: str | None
+    source: str
+    reason_code: str
+    checked_at: str
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[a-z][a-z0-9._-]{0,63}", self.adapter_id):
+            raise ExecutionError("adapter_id inválido")
+        if self.status not in {"available", "unavailable", "unknown"}:
+            raise ExecutionError("estado de disponibilidade inválido")
+        if not self.executable or "\x00" in self.executable or not self.source:
+            raise ExecutionError("origem de disponibilidade inválida")
+        if self.version is not None and (type(self.version) is not str or not self.version):
+            raise ExecutionError("versão de disponibilidade inválida")
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.reason_code):
+            raise ExecutionError("reason_code de disponibilidade inválido")
+        try:
+            checked = datetime.fromisoformat(self.checked_at.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise ExecutionError("checked_at inválido") from exc
+        if checked.tzinfo is None:
+            raise ExecutionError("checked_at deve conter timezone")
+
+
+@dataclass(frozen=True)
+class AgentCapabilities:
+    """Distinguishes agent-session features from AgentFlow process services."""
+
+    task_initialization: str
+    structured_result_format: tuple[str, ...]
+    agent_session_tracking: bool
+    agent_session_cancellation: bool
+    agent_session_recovery: bool
+    process_monitoring_owner: str
+    process_cancellation_owner: str
+    process_recovery_owner: str
+    evidence_collection_owner: str
+
+    def __post_init__(self) -> None:
+        if self.task_initialization not in {"supported", "unknown", "unavailable"}:
+            raise ExecutionError("capability de inicialização inválida")
+        if (type(self.structured_result_format) is not tuple
+                or len(set(self.structured_result_format)) != len(self.structured_result_format)
+                or any(type(value) is not str or not re.fullmatch(r"[a-z0-9._-]{1,32}", value)
+                       for value in self.structured_result_format)):
+            raise ExecutionError("formatos de resultado inválidos")
+        for name in ("agent_session_tracking", "agent_session_cancellation", "agent_session_recovery"):
+            if type(getattr(self, name)) is not bool:
+                raise ExecutionError(f"{name} precisa ser booleano")
+        for name in ("process_monitoring_owner", "process_cancellation_owner",
+                     "process_recovery_owner", "evidence_collection_owner"):
+            value = getattr(self, name)
+            if type(value) is not str or not re.fullmatch(r"[a-z][a-z0-9._-]{0,127}", value):
+                raise ExecutionError(f"{name} inválido")
+
+
+class LifecycleAgentAdapter(AgentAdapter, Protocol):
+    """Versioned common adapter surface; process lifecycle remains AgentFlow-owned."""
+
+    adapter_id: str
+    api_version: str
+
+    def discover(self) -> AgentAvailability: ...
+    def capabilities(self) -> AgentCapabilities: ...
+    def prepare_task(self, request: ExecutionRequest) -> ProcessSpec: ...
+    def collect_result(self, result: ProcessResult) -> AgentResult: ...
+    def normalize_state(self, status: str) -> NormalizedAgentState: ...
 
 
 class ProcessRuntime(Protocol):

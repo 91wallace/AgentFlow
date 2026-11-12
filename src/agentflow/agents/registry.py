@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Mapping
 
-from .contracts import AgentAdapter, ExecutionError
+from .contracts import AgentAdapter, ExecutionError, LifecycleAgentAdapter
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
@@ -73,6 +73,14 @@ class AgentRegistry:
             return self._adapters[adapter_id][1]
         except KeyError as exc:
             raise ExecutionError(f"adapter não registrado: {adapter_id}") from exc
+
+    def resolve_lifecycle(self, adapter_id: str) -> LifecycleAgentAdapter:
+        """Resolve the richer common surface without breaking legacy adapters."""
+        adapter = self.resolve(adapter_id)
+        required = ("discover", "capabilities", "prepare_task", "collect_result", "normalize_state")
+        if any(not callable(getattr(adapter, name, None)) for name in required):
+            raise ExecutionError(f"adapter não oferece contrato lifecycle v1: {adapter_id}")
+        return adapter
 
     def ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._adapters))

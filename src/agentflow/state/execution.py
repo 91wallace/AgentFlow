@@ -27,6 +27,15 @@ class Attempt:
     created: bool = field(default=False, compare=False)
 
 
+@dataclass(frozen=True)
+class ValidatedEvidence:
+    """Verified evidence explicitly bound to a successful attempt validation."""
+
+    evidence_id: int
+    criterion_id: str
+    passed: bool
+
+
 class ExecutionStore(SQLiteStore):
     def __init__(self, path: Path, *, agent_models: bool = False):
         super().__init__(path, execution=True, git=True, validation=agent_models,
@@ -38,6 +47,48 @@ class ExecutionStore(SQLiteStore):
         if row is None:
             raise TransitionError("tentativa desconhecida")
         return Attempt(*row)
+
+    def validated_evidence(self, attempt_id: str) -> tuple[ValidatedEvidence, ...]:
+        """Read evidence referenced by the append-only successful validation event.
+
+        This read-only API deliberately does not infer validation from evidence rows
+        alone: every returned row must be explicitly named by the attempt's
+        ``validation_passed`` event and remain bound to that attempt's task revision.
+        """
+        attempt = self.attempt(attempt_id)
+        if attempt.status != "process_succeeded" or attempt.validation_status != "validation_passed":
+            raise TransitionError("attempt must be process_succeeded and validation_passed")
+        row = self.db.execute(
+            "SELECT project_id FROM execution_attempts WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        events = self.db.execute(
+            "SELECT payload FROM execution_events WHERE attempt_id=? AND kind='validation_passed' ORDER BY event_id DESC",
+            (attempt_id,),
+        ).fetchall()
+        if row is None or len(events) != 1:
+            raise TransitionError("validated attempt must have exactly one persisted evidence event")
+        try:
+            event_payload = json.loads(events[0][0])
+            if not isinstance(event_payload, dict):
+                raise TypeError("validation event payload must be an object")
+            event_evidence = event_payload.get("evidence_ids", ())
+            if not isinstance(event_evidence, list):
+                raise TypeError("evidence_ids must be a list")
+            evidence_ids = tuple(event_evidence)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TransitionError("persisted validation evidence event is invalid") from exc
+        if (not evidence_ids or any(type(item) is not int for item in evidence_ids)
+                or len(set(evidence_ids)) != len(evidence_ids)):
+            raise TransitionError("persisted validation evidence references are invalid")
+        placeholders = ",".join("?" for _ in evidence_ids)
+        evidence_rows = self.db.execute(
+            f"SELECT evidence_id,criterion_id,passed FROM evidence WHERE project_id=? AND task_id=? "
+            f"AND definition_revision=? AND kind='verified' AND evidence_id IN ({placeholders}) ORDER BY evidence_id",
+            (row[0], attempt.task_id, attempt.definition_revision, *evidence_ids),
+        ).fetchall()
+        if len(evidence_rows) != len(evidence_ids) or any(not item[2] for item in evidence_rows):
+            raise TransitionError("persisted verified evidence does not match validation event")
+        return tuple(ValidatedEvidence(item[0], item[1], bool(item[2])) for item in evidence_rows)
 
     def process_identity(self, attempt_id: str) -> ProcessIdentity | None:
         row = self.db.execute("SELECT pid,process_started_at,group_id,parent_pid,parent_started_at,process_token FROM execution_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()

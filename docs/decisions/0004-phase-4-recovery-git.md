@@ -1,6 +1,6 @@
 # ADR 0004: Recuperação e operações Git locais explícitas
 
-Status: **aprovado e implementado localmente na branch `feat/git-recovery-phase-4`; publicação/CI aguardam autorização**.
+Status: **aprovado, homologado e integrado pelo PR #4**. Commit da branch revisado: `709e77ad46dfa3283922856fd078b6baca1b6029`. Merge sem reescrita: `8ec623813709d71b98fbd0be7e8fba87ebb9d565`; os seis checks Python 3.11/3.12/3.13 (push e PR) passaram. Ver [progresso da Fase 4](../phase-4-progress.md).
 
 ## Contexto e escopo
 

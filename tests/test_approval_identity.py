@@ -302,7 +302,7 @@ def test_concurrent_same_operation_claim_has_single_winner(tmp_path):
         store.verify_integrity()
 
 
-def test_broker_v1_database_migrates_transactionally_to_v3(tmp_path):
+def test_broker_v1_database_migrates_transactionally_to_v4(tmp_path):
     import sqlite3
     import agentflow.approval.persistence as persistence
 
@@ -313,7 +313,7 @@ def test_broker_v1_database_migrates_transactionally_to_v3(tmp_path):
         db.execute(f"PRAGMA application_id={persistence.APPLICATION_ID}")
         db.execute("PRAGMA user_version=1")
     with BrokerStore(path) as store:
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
         assert store.db.execute("SELECT name FROM sqlite_master WHERE name='broker_clients'").fetchone()
         assert store.db.execute("SELECT name FROM sqlite_master WHERE name='webauthn_credentials'").fetchone()
         store.verify_integrity()

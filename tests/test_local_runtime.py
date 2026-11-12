@@ -67,6 +67,11 @@ def test_logs_redact_secrets_and_write_atomic_metadata(tmp_path):
     assert (result.stdout_path.parent / "metadata.json").is_file()
 
 
+def test_log_redaction_preserves_codex_approval_flag():
+    from agentflow.runtime.local import redact
+    assert b"--ask-for-approval" in redact(b"error: unexpected argument '--ask-for-approval'")
+
+
 def test_log_write_failure_stops_process_and_is_recorded(tmp_path, monkeypatch):
     original = open
     class BrokenWriter:

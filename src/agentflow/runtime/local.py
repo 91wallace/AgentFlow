@@ -16,7 +16,7 @@ from agentflow.agents import (Cancellation, ExecutionPolicy, ProcessIdentity,
 
 
 _KEY_VALUE = re.compile(r'(?i)((?:api[_-]?key|token|password|authorization)["\']?\s*[:=]\s*["\']?)([^"\'\s,}]+)')
-_TOKEN = re.compile(r'sk-[A-Za-z0-9_-]{10,}')
+_TOKEN = re.compile(r'(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{10,}')
 
 
 class SpawnFailure(OSError):

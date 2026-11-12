@@ -2,6 +2,8 @@ import pytest
 
 from agentflow.agents import (AdapterDescriptor, AgentRegistry, CapabilityReport,
                               ExecutionError)
+from agentflow.agents.contracts import (AgentAvailability, AgentCapabilities,
+                                        NormalizedAgentState)
 
 
 class FakeAdapter:
@@ -43,3 +45,36 @@ def test_adapter_descriptor_and_capability_report_are_validated():
     with pytest.raises(ExecutionError):
         CapabilityReport("sandbox", "enforced", "", "")
     assert CapabilityReport("network", "unknown", "official-docs").state == "unknown"
+
+
+def test_registry_resolves_rich_lifecycle_contract_without_changing_legacy_contract():
+    class RichAdapter(FakeAdapter):
+        adapter_id = "rich"
+        api_version = "1"
+
+        def discover(self):
+            return AgentAvailability("rich", "available", "rich-cli", "1.0", "test",
+                                     "version_tested", "2026-11-11T00:00:00Z")
+
+        def capabilities(self):
+            return AgentCapabilities("supported", ("jsonl",), False, False, False,
+                                     "agentflow.runtime.local", "agentflow.runtime.local",
+                                     "agentflow.state.execution", "agentflow.state.execution")
+
+        def prepare_task(self, request):
+            return self.prepare(request)
+
+        def collect_result(self, result):
+            return self.interpret(result)
+
+        def normalize_state(self, status):
+            return NormalizedAgentState.UNKNOWN
+
+    registry = AgentRegistry()
+    adapter = RichAdapter()
+    registry.register(descriptor("rich"), adapter)
+    assert registry.resolve_lifecycle("rich") is adapter
+    legacy = AgentRegistry()
+    legacy.register(descriptor("fake"), FakeAdapter())
+    with pytest.raises(ExecutionError, match="lifecycle v1"):
+        legacy.resolve_lifecycle("fake")

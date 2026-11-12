@@ -61,3 +61,7 @@ F5-01 está documentalmente fixada pelos parâmetros e perfis acima. Antes de es
 ## Riscos residuais
 
 Runtime local sob o mesmo usuário não isola processos do filesystem/rede sem suporte OS comprovável; Docker ainda depende de daemon/kernel/imagem/configuração e não neutraliza código malicioso em toda circunstância. Semântica de symlink, ACL, case, process groups, resource limits e signals difere entre Windows e Linux. Redaction não encontra todos os segredos; build/test podem ser não determinísticos; provenance comprova entradas/outputs, não correção lógica. Entrega pode produzir efeito remoto irreversível antes de resposta perdida, exigindo operador para reconciliar. SQLite backup/migração e retenção requerem espaço e procedimento de recuperação.
+
+## Addendum SDD — rastreabilidade futura
+
+Os resultados F5 atuais são vinculados à revisão de tarefa/definition digest, checkpoint, snapshot e versão do validador, e evidência stale não satisfaz a conclusão. F5 não cria, por si, `SpecificationRevision` nem vínculos explícitos entre critério de tarefa e requisito global. Quando esses contratos forem implementados, cada snapshot/gate/evidência deverá carregar a revisão de especificação/plano e os IDs de requisito/critério aplicáveis, preservando os vínculos F5 existentes. Uma mudança aceita de requisito torna incompatível (não apaga) qualquer resultado cujo snapshot não corresponda à revisão/checkpoint exigidos. Migração e política de compatibilidade devem ser aditivas e testadas; não promover resultados antigos automaticamente.

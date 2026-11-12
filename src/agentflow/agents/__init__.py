@@ -1,8 +1,11 @@
 """Agent-independent execution contracts and adapters."""
 
-from .contracts import (AgentAdapter, AgentResult, Cancellation, ExecutionError,
-                        ExecutionPolicy, ExecutionRequest, ProcessIdentity, ProcessResult,
-                        ProcessRuntime, ProcessSpec, StartedCallback)
+from .contracts import (AgentAdapter, AgentAvailability, AgentCapabilities, AgentResult,
+                        Cancellation, ExecutionError, ExecutionPolicy, ExecutionRequest,
+                        LifecycleAgentAdapter, NormalizedAgentState, ProcessIdentity,
+                        ProcessResult, ProcessRuntime, ProcessSpec, StartedCallback,
+                        normalize_execution_state)
+from .codex import CodexAdapter
 from .registry import AdapterDescriptor, AgentRegistry, CapabilityReport
 from .models import ModelCatalogEntry, ModelDescriptor, ProviderDescriptor
 from .selection import ModelSelectionObservation, ModelSelectionRequest
@@ -16,6 +19,9 @@ from .routing import TaskClassification, RoutingDecision, classify_task, evaluat
 __all__ = ["AgentAdapter", "AgentResult", "Cancellation", "ExecutionError", "ExecutionPolicy",
            "ExecutionRequest", "ProcessIdentity", "ProcessResult", "ProcessRuntime", "ProcessSpec", "StartedCallback",
            "AdapterDescriptor", "AgentRegistry", "CapabilityReport"]
+__all__ += ["AgentAvailability", "AgentCapabilities", "LifecycleAgentAdapter",
+            "NormalizedAgentState", "normalize_execution_state"]
+__all__ += ["CodexAdapter"]
 __all__ += ["ModelDescriptor", "ProviderDescriptor"]
 __all__ += ["ModelCatalogEntry"]
 __all__ += ["ModelSelectionObservation", "ModelSelectionRequest"]

@@ -50,23 +50,78 @@ from .webauthn import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 APPLICATION_ID = int.from_bytes(b"AFBR", "big")
 BUSY_TIMEOUT_MS = 5_000
+PENDING_PROPOSAL_TTL_SECONDS = 7 * 24 * 60 * 60
 _REQUEST_TRANSITIONS = {
     "pending": {"approved", "rejected", "expired", "unknown"},
     "approved": {"revoked", "expired", "unknown"},
     "rejected": set(), "expired": set(), "revoked": set(), "unknown": set(),
 }
 _SNAPSHOT_TRANSITIONS = {
-    "pending": {"accepted", "rejected", "expired"},
+    "pending": {"accepted", "rejected", "expired", "cancelled", "obsolete"},
     "accepted": {"revoked"},
     "rejected": set(), "expired": set(), "revoked": set(),
+    "cancelled": set(), "obsolete": set(),
 }
 _AUTHORIZATION_TRANSITIONS = {
     "approved": {"consumed", "revoked", "expired", "unknown"},
     "consumed": set(), "rejected": set(), "expired": set(), "revoked": set(), "unknown": set(),
 }
+_LOCAL_GRANT_TRANSITIONS = {
+    "approved": {"revoked", "expired", "consumed"},
+    "revoked": set(), "expired": set(), "consumed": set(),
+}
+_SERVICE_EVENT_FIELDS = {
+    "service.started": {"protocol_version", "status", "recovered", "previous_instance_id"},
+    "service.recovered": {"protocol_version", "previous_instance_id"},
+    "service.status_queried": {"protocol_version", "message_id"},
+    "service.request_rejected": {"protocol_version", "message_id", "reason_code"},
+    "service.failed": {"protocol_version", "status", "reason_code"},
+    "service.stopped": {"protocol_version", "status"},
+}
+_SERVICE_REJECTION_REASONS = {
+    "invalid_frame", "unsupported_protocol", "invalid_message", "operation_not_exposed",
+    "tls_peer_unverified", "unsupported_message_type", "request_timeout", "listener_failure",
+    "scope_denied", "invalid_proposal", "persistence_failed", "snapshot_unavailable",
+    "proposal_conflict", "lifecycle_conflict",
+}
+
+
+def _valid_service_event(event_type: str, aggregate_type: str, aggregate_id: str,
+                         payload: dict) -> bool:
+    if (aggregate_type != "broker_service" or event_type not in _SERVICE_EVENT_FIELDS
+            or type(aggregate_id) is not str or not aggregate_id or len(aggregate_id) > 128
+            or type(payload) is not dict or set(payload) != _SERVICE_EVENT_FIELDS[event_type]
+            or type(payload.get("protocol_version")) is not int
+            or payload["protocol_version"] != PROTOCOL_VERSION):
+        return False
+    if event_type in {"service.started", "service.failed", "service.stopped"}:
+        target = {"service.started": "running", "service.failed": "failed",
+                  "service.stopped": "stopped"}[event_type]
+        if payload.get("status") != target:
+            return False
+    if event_type == "service.started":
+        previous = payload.get("previous_instance_id")
+        if (type(payload.get("recovered")) is not bool
+                or (previous is not None and (type(previous) is not str or not previous))):
+            return False
+    if event_type == "service.recovered":
+        previous = payload.get("previous_instance_id")
+        if type(previous) is not str or not previous or previous == aggregate_id:
+            return False
+    if event_type in {"service.status_queried", "service.request_rejected"}:
+        message_id = payload.get("message_id")
+        if message_id is not None and (type(message_id) is not str or not message_id):
+            return False
+    if (event_type == "service.request_rejected"
+            and payload.get("reason_code") not in _SERVICE_REJECTION_REASONS):
+        return False
+    if (event_type == "service.failed"
+            and payload.get("reason_code") != "listener_failure"):
+        return False
+    return True
 
 
 class BrokerStoreError(RuntimeError):
@@ -91,6 +146,21 @@ class SnapshotRecord:
     state: str
     canonical_digest: str
     event_id: str
+
+
+@dataclass(frozen=True)
+class PendingSnapshotRecord:
+    proposal: SnapshotProposal
+    journal_sequence: int
+
+
+@dataclass(frozen=True)
+class ProposalLifecycleRecord:
+    proposal: SnapshotProposal
+    state: str
+    journal_sequence: int
+    actor_id: str
+    event_payload: dict
 
 
 @dataclass(frozen=True)
@@ -205,6 +275,27 @@ _SCHEMA_V3 = (
     "CREATE TRIGGER webauthn_challenges_no_delete BEFORE DELETE ON webauthn_challenges BEGIN SELECT RAISE(ABORT,'WebAuthn challenge history is retained'); END",
 )
 
+_SCHEMA_V5 = (
+    "CREATE TABLE local_consent_decisions (decision_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, "
+    "request_digest TEXT NOT NULL UNIQUE, decision_json TEXT NOT NULL, record_digest TEXT NOT NULL UNIQUE, "
+    "occurred_at TEXT NOT NULL)",
+    "CREATE TABLE local_authorization_grants (grant_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, "
+    "consent_decision_id TEXT NOT NULL UNIQUE REFERENCES local_consent_decisions(decision_id), "
+    "request_digest TEXT NOT NULL UNIQUE, grant_json TEXT NOT NULL, grant_digest TEXT NOT NULL UNIQUE, "
+    "expires_at TEXT NOT NULL)",
+    "CREATE TABLE local_authorization_state (grant_id TEXT PRIMARY KEY REFERENCES local_authorization_grants(grant_id), "
+    "status TEXT NOT NULL CHECK(status IN ('approved','revoked','expired','consumed')), "
+    "changed_at TEXT NOT NULL, last_event_id TEXT NOT NULL)",
+    "CREATE TRIGGER local_consent_immutable_update BEFORE UPDATE ON local_consent_decisions "
+    "BEGIN SELECT RAISE(ABORT,'local consent decisions are append-only'); END",
+    "CREATE TRIGGER local_consent_immutable_delete BEFORE DELETE ON local_consent_decisions "
+    "BEGIN SELECT RAISE(ABORT,'local consent decisions are append-only'); END",
+    "CREATE TRIGGER local_grants_immutable_update BEFORE UPDATE ON local_authorization_grants "
+    "BEGIN SELECT RAISE(ABORT,'local grants are immutable'); END",
+    "CREATE TRIGGER local_grants_immutable_delete BEFORE DELETE ON local_authorization_grants "
+    "BEGIN SELECT RAISE(ABORT,'local grant history is retained'); END",
+)
+
 _TABLES = (
     "execution_receipt_state", "execution_receipts", "authorization_state",
     "execution_authorizations", "approval_decisions", "approval_request_state",
@@ -212,6 +303,7 @@ _TABLES = (
     "broker_snapshots", "broker_client_operations", "broker_client_policies",
     "broker_client_credentials", "broker_clients", "webauthn_challenge_state",
     "webauthn_challenges", "webauthn_credential_state", "webauthn_credentials",
+    "local_authorization_state", "local_authorization_grants", "local_consent_decisions",
 )
 
 
@@ -289,7 +381,7 @@ class BrokerStore:
             if app_id != APPLICATION_ID:
                 raise BrokerStoreError("Broker schema identity mismatch")
             return
-        if version not in (0, 1, 2) or app_id not in (0, APPLICATION_ID):
+        if version not in (0, 1, 2, 3, 4) or app_id not in (0, APPLICATION_ID):
             raise BrokerStoreError("unsupported Broker schema migration path")
         try:
             self.db.execute("BEGIN IMMEDIATE")
@@ -307,6 +399,25 @@ class BrokerStore:
             if version == 2:
                 for statement in _SCHEMA_V3:
                     self.db.execute(statement)
+                version = 3
+            if version == 3:
+                self.db.execute(
+                    "CREATE TABLE snapshot_state_v4 (snapshot_id TEXT PRIMARY KEY "
+                    "REFERENCES broker_snapshots(snapshot_id), status TEXT NOT NULL "
+                    "CHECK(status IN ('pending','accepted','rejected','expired','revoked','cancelled','obsolete')),"
+                    "actor_id TEXT NOT NULL, changed_at TEXT NOT NULL, last_event_id TEXT NOT NULL)"
+                )
+                self.db.execute(
+                    "INSERT INTO snapshot_state_v4 SELECT snapshot_id,status,actor_id,changed_at,last_event_id "
+                    "FROM snapshot_state"
+                )
+                self.db.execute("DROP TABLE snapshot_state")
+                self.db.execute("ALTER TABLE snapshot_state_v4 RENAME TO snapshot_state")
+                version = 4
+            if version == 4:
+                for statement in _SCHEMA_V5:
+                    self.db.execute(statement)
+                version = 5
             self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.db.commit()
         except sqlite3.Error as exc:
@@ -369,6 +480,53 @@ class BrokerStore:
                 (credential.credential_id, "active", 0, "zero", credential.created_at, event_id),
             )
             return CredentialStateRecord(credential, "active", 0, "zero", event_id)
+
+    def list_active_webauthn_credentials(self, principal_id: str, rp_id: str) -> tuple[CredentialStateRecord, ...]:
+        """Return active public credentials for an exact local principal/RP pair."""
+        if type(principal_id) is not str or not principal_id or type(rp_id) is not str or not rp_id:
+            raise BrokerStoreError("WebAuthn principal and RP are required")
+        with self._mutex:
+            rows = self.db.execute(
+                "SELECT c.credential_json,s.status,s.sign_count,s.counter_mode,s.last_event_id "
+                "FROM webauthn_credentials c JOIN webauthn_credential_state s USING(credential_id) "
+                "WHERE c.principal_id=? AND c.rp_id=? AND s.status='active' ORDER BY c.credential_id",
+                (principal_id, rp_id),
+            ).fetchall()
+        return tuple(CredentialStateRecord(WebAuthnCredential.from_json(row[0]), row[1], row[2], row[3], row[4])
+                     for row in rows)
+
+    def advance_webauthn_credential_counter(self, credential_id: str, counter: int, *,
+                                             now: datetime | None = None) -> CredentialStateRecord:
+        """Atomically persist an increasing authenticator counter and its journal event."""
+        if (type(credential_id) is not str or not credential_id
+                or type(counter) is not int or not 0 <= counter <= 0xFFFFFFFF):
+            raise BrokerStoreError("WebAuthn signature counter is invalid")
+        instant = now or datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            raise BrokerStoreError("WebAuthn counter clock must be timezone-aware")
+        occurred = instant.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT c.credential_json,s.status,s.sign_count,s.counter_mode,s.last_event_id "
+                "FROM webauthn_credentials c JOIN webauthn_credential_state s USING(credential_id) "
+                "WHERE c.credential_id=?", (credential_id,),
+            ).fetchone()
+            if row is None or row[1] != "active":
+                raise BrokerStoreError("active WebAuthn credential not found")
+            credential = WebAuthnCredential.from_json(row[0])
+            if row[3] == "monotonic" and counter <= row[2]:
+                raise BrokerConflict("WebAuthn signature counter replay or regression")
+            if counter == 0 and row[3] == "zero":
+                return CredentialStateRecord(credential, row[1], row[2], row[3], row[4])
+            mode = "monotonic" if counter or row[2] else "zero"
+            event_id, _ = self._append_event(
+                db, "webauthn_credential", credential_id, "webauthn_credential.counter_updated",
+                {"status": "active", "from": row[2], "to": counter,
+                 "counter_mode": mode, "credential_digest": credential.credential_digest}, occurred)
+            db.execute("UPDATE webauthn_credential_state SET sign_count=?,counter_mode=?,changed_at=?,"
+                       "last_event_id=? WHERE credential_id=?",
+                       (counter, mode, occurred, event_id, credential_id))
+            return CredentialStateRecord(credential, "active", counter, mode, event_id)
 
     def build_consent_presentation(self, request_id: str, *, now: datetime | None = None):
         """Build a deterministic display model in a read transaction; no state is changed."""
@@ -745,21 +903,34 @@ class BrokerStore:
         """Persist immutable candidate bytes as pending; this never accepts a snapshot."""
         if not isinstance(proposal, SnapshotProposal):
             raise BrokerStoreError("snapshot must be a SnapshotProposal")
-        now = proposal.proposed_at
+        if proposal.operation_id == self._proposal_expiry_operation_id(proposal.snapshot_id):
+            raise BrokerConflict("proposal operation_id conflicts with reserved expiry operation")
+        now = utc_now()
         with self.transaction() as db:
             prior = db.execute(
-                "SELECT snapshot_id,canonical_digest FROM broker_snapshots WHERE operation_id=?",
+                "SELECT * FROM broker_snapshots WHERE operation_id=?",
                 (proposal.operation_id,),
             ).fetchone()
             if prior:
-                if prior[0] != proposal.snapshot_id or prior[1] != proposal.canonical_digest:
+                stored = SnapshotProposal(
+                    PROTOCOL_VERSION, prior["snapshot_id"], prior["kind"], prior["project_id"],
+                    prior["revision_id"], prior["schema_version"], prior["content_json"],
+                    prior["canonical_digest"], prior["provenance_json"], prior["proposed_by"],
+                    prior["operation_id"], prior["proposed_at"], prior["parent_digest"],
+                )
+                if stored.to_json() != proposal.to_json():
                     raise BrokerConflict("snapshot operation_id reused with different parameters")
                 state = db.execute("SELECT status,last_event_id FROM snapshot_state WHERE snapshot_id=?",
-                                   (prior[0],)).fetchone()
-                return SnapshotRecord(prior[0], state[0], prior[1], state[1])
+                                   (stored.snapshot_id,)).fetchone()
+                if state is None:
+                    raise BrokerIntegrityError("snapshot proposal has no materialized state")
+                return SnapshotRecord(stored.snapshot_id, state[0], stored.canonical_digest, state[1])
             if db.execute("SELECT 1 FROM broker_snapshots WHERE snapshot_id=?",
                           (proposal.snapshot_id,)).fetchone():
                 raise BrokerConflict("snapshot_id already belongs to another operation")
+            if (self._lifecycle_operation_exists(db, proposal.operation_id)
+                    or self._reserved_expiry_operation_exists(db, proposal.operation_id)):
+                raise BrokerConflict("proposal operation_id conflicts with a lifecycle operation")
             db.execute(
                 "INSERT INTO broker_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (proposal.snapshot_id, proposal.kind, proposal.project_id, proposal.revision_id,
@@ -775,6 +946,70 @@ class BrokerStore:
             db.execute("INSERT INTO snapshot_state VALUES(?,?,?,?,?)",
                        (proposal.snapshot_id, "pending", proposal.proposed_by, now, event_id))
             return SnapshotRecord(proposal.snapshot_id, "pending", proposal.canonical_digest, event_id)
+
+    @staticmethod
+    def _proposal_expiry_operation_id(snapshot_id: str) -> str:
+        return "expire-" + hashlib.sha256(
+            f"agentflow-proposal-expiry:{snapshot_id}".encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _lifecycle_operation_exists(db: sqlite3.Connection, operation_id: str) -> bool:
+        for row in db.execute(
+                "SELECT payload_json FROM broker_events WHERE aggregate_type='snapshot' "
+                "AND event_type='snapshot.status_changed'"):
+            if json.loads(row[0]).get("operation_id") == operation_id:
+                return True
+        return False
+
+    @classmethod
+    def _reserved_expiry_operation_exists(cls, db: sqlite3.Connection, operation_id: str) -> bool:
+        return any(cls._proposal_expiry_operation_id(row[0]) == operation_id
+                   for row in db.execute("SELECT snapshot_id FROM broker_snapshots"))
+
+    def get_pending_snapshot_for_identity(
+            self, snapshot_id: str, *, principal_id: str,
+            authorized_project_ids: tuple[str, ...]) -> PendingSnapshotRecord | None:
+        """Return one pending proposal only when owner and project scope both match."""
+        if not authorized_project_ids:
+            return None
+        placeholders = ",".join("?" for _ in authorized_project_ids)
+        row = self.db.execute(
+            "SELECT s.*,st.status,st.actor_id AS state_owner,st.last_event_id,e.sequence,e.payload_json "
+            "FROM broker_snapshots s JOIN snapshot_state st USING(snapshot_id) "
+            "JOIN broker_events e ON e.event_id=st.last_event_id "
+            f"WHERE s.snapshot_id=? AND s.project_id IN ({placeholders}) "
+            "AND st.status='pending' AND s.proposed_by=? AND st.actor_id=? "
+            "AND e.aggregate_type='snapshot' AND e.aggregate_id=s.snapshot_id "
+            "AND e.event_type='snapshot.proposed'",
+            (snapshot_id, *authorized_project_ids, principal_id, principal_id),
+        ).fetchone()
+        if row is None:
+            # A matching pending projection without its proposal event is corruption,
+            # not an ordinary missing/out-of-scope result.
+            inconsistent = self.db.execute(
+                "SELECT 1 FROM broker_snapshots s JOIN snapshot_state st USING(snapshot_id) "
+                f"WHERE s.snapshot_id=? AND s.project_id IN ({placeholders}) "
+                "AND s.proposed_by=? AND st.status='pending'",
+                (snapshot_id, *authorized_project_ids, principal_id),
+            ).fetchone()
+            if inconsistent:
+                raise BrokerIntegrityError("pending snapshot journal linkage is inconsistent")
+            return None
+        proposal = SnapshotProposal(
+            PROTOCOL_VERSION, row["snapshot_id"], row["kind"], row["project_id"],
+            row["revision_id"], row["schema_version"], row["content_json"],
+            row["canonical_digest"], row["provenance_json"], row["proposed_by"],
+            row["operation_id"], row["proposed_at"], row["parent_digest"],
+        )
+        try:
+            event_payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise BrokerIntegrityError("pending snapshot journal payload is invalid") from exc
+        if event_payload != {"status": "pending", "digest": proposal.canonical_digest,
+                            "operation_id": proposal.operation_id} or row["state_owner"] != proposal.proposed_by:
+            raise BrokerIntegrityError("pending snapshot journal payload diverges from proposal")
+        return PendingSnapshotRecord(proposal, row["sequence"])
 
     def get_snapshot(self, snapshot_id: str) -> SnapshotProposal | AcceptedSnapshot:
         row = self.db.execute(
@@ -797,6 +1032,49 @@ class BrokerStore:
             row["operation_id"], row["proposed_at"], row["parent_digest"],
         )
 
+    def get_proposal_lifecycle_for_identity(
+            self, snapshot_id: str, *, principal_id: str,
+            authorized_project_ids: tuple[str, ...]) -> ProposalLifecycleRecord | None:
+        """Read metadata for an owned proposal in any persisted lifecycle state."""
+        if not authorized_project_ids:
+            return None
+        placeholders = ",".join("?" for _ in authorized_project_ids)
+        row = self.db.execute(
+            "SELECT s.*,st.status,st.actor_id,st.last_event_id,e.sequence,e.event_type,e.payload_json "
+            "FROM broker_snapshots s JOIN snapshot_state st USING(snapshot_id) "
+            "JOIN broker_events e ON e.event_id=st.last_event_id "
+            f"WHERE s.snapshot_id=? AND s.project_id IN ({placeholders}) AND s.proposed_by=? "
+            "AND e.aggregate_type='snapshot' AND e.aggregate_id=s.snapshot_id",
+            (snapshot_id, *authorized_project_ids, principal_id),
+        ).fetchone()
+        if row is None:
+            return None
+        proposal = SnapshotProposal(
+            PROTOCOL_VERSION, row["snapshot_id"], row["kind"], row["project_id"],
+            row["revision_id"], row["schema_version"], row["content_json"],
+            row["canonical_digest"], row["provenance_json"], row["proposed_by"],
+            row["operation_id"], row["proposed_at"], row["parent_digest"],
+        )
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise BrokerIntegrityError("proposal lifecycle journal payload is invalid") from exc
+        if row["event_type"] == "snapshot.proposed":
+            valid = (row["status"] == "pending" and payload == {
+                "status": "pending", "digest": proposal.canonical_digest,
+                "operation_id": proposal.operation_id,
+            } and row["actor_id"] == proposal.proposed_by)
+        elif row["event_type"] == "snapshot.status_changed":
+            valid = (payload.get("to") == row["status"]
+                     and payload.get("actor_id") == row["actor_id"])
+        else:
+            valid = False
+        if not valid:
+            raise BrokerIntegrityError("proposal lifecycle projection diverges from journal")
+        return ProposalLifecycleRecord(
+            proposal, row["status"], row["sequence"], row["actor_id"], payload,
+        )
+
     def _transition_snapshot(self, snapshot_id: str, target: str, actor_id: str,
                               occurred_at: str | None = None, *, proof_digest: str | None = None) -> None:
         """Internal projection primitive; only a future verified authority may call it."""
@@ -804,20 +1082,153 @@ class BrokerStore:
         if target == "accepted" and not _is_digest(proof_digest):
             raise BrokerStoreError("snapshot acceptance requires verified authority proof")
         with self.transaction() as db:
-            row = db.execute("SELECT status FROM snapshot_state WHERE snapshot_id=?",
-                             (snapshot_id,)).fetchone()
-            if row is None:
-                raise BrokerStoreError("snapshot not found")
-            current = row[0]
-            if target not in _SNAPSHOT_TRANSITIONS.get(current, set()):
-                raise BrokerConflict(f"invalid snapshot state transition: {current} -> {target}")
-            event_id, _ = self._append_event(
-                db, "snapshot", snapshot_id, "snapshot.status_changed",
-                {"from": current, "to": target, "actor_id": actor_id,
-                 "proof_digest": proof_digest}, occurred_at,
+            self._apply_snapshot_transition(db, snapshot_id, target, actor_id, occurred_at,
+                                            proof_digest=proof_digest)
+
+    def _apply_snapshot_transition(self, db: sqlite3.Connection, snapshot_id: str, target: str,
+                                   actor_id: str, occurred_at: str, *,
+                                   proof_digest: str | None = None,
+                                   operation_id: str | None = None,
+                                   event_details: dict | None = None) -> SnapshotRecord:
+        row = db.execute("SELECT status FROM snapshot_state WHERE snapshot_id=?",
+                         (snapshot_id,)).fetchone()
+        if row is None:
+            raise BrokerStoreError("snapshot not found")
+        current = row[0]
+        if target not in _SNAPSHOT_TRANSITIONS.get(current, set()):
+            raise BrokerConflict(f"invalid snapshot state transition: {current} -> {target}")
+        payload = {"from": current, "to": target, "actor_id": actor_id,
+                   "proof_digest": proof_digest}
+        if operation_id is not None:
+            payload["operation_id"] = operation_id
+        if event_details:
+            payload.update(event_details)
+        event_id, _ = self._append_event(
+            db, "snapshot", snapshot_id, "snapshot.status_changed", payload, occurred_at,
+        )
+        db.execute("UPDATE snapshot_state SET status=?,actor_id=?,changed_at=?,last_event_id=? "
+                   "WHERE snapshot_id=?", (target, actor_id, occurred_at, event_id, snapshot_id))
+        digest = db.execute("SELECT canonical_digest FROM broker_snapshots WHERE snapshot_id=?",
+                            (snapshot_id,)).fetchone()[0]
+        return SnapshotRecord(snapshot_id, target, digest, event_id)
+
+    @staticmethod
+    def _snapshot_operation_replay(db: sqlite3.Connection, *, snapshot_id: str,
+                                   target: str, actor_id: str, operation_id: str,
+                                   event_details: dict) -> SnapshotRecord | None:
+        expected = {"from": "pending", "to": target, "actor_id": actor_id,
+                    "proof_digest": None, "operation_id": operation_id, **event_details}
+        rows = db.execute(
+            "SELECT aggregate_id,payload_json FROM broker_events "
+            "WHERE aggregate_type='snapshot' AND event_type='snapshot.status_changed'"
+        ).fetchall()
+        for event in rows:
+            payload = json.loads(event["payload_json"])
+            if payload.get("operation_id") == operation_id:
+                if event["aggregate_id"] != snapshot_id or payload != expected:
+                    raise BrokerConflict("lifecycle operation_id was reused with different parameters")
+                state = db.execute(
+                    "SELECT status,last_event_id FROM snapshot_state WHERE snapshot_id=?",
+                    (snapshot_id,),
+                ).fetchone()
+                if state is None or state[0] != target:
+                    raise BrokerIntegrityError("lifecycle replay no longer matches terminal state")
+                digest = db.execute(
+                    "SELECT canonical_digest FROM broker_snapshots WHERE snapshot_id=?",
+                    (snapshot_id,),
+                ).fetchone()[0]
+                return SnapshotRecord(snapshot_id, state[0], digest, state[1])
+        if db.execute("SELECT 1 FROM broker_snapshots WHERE operation_id=?", (operation_id,)).fetchone():
+            raise BrokerConflict("lifecycle operation_id conflicts with a proposal operation")
+        return None
+
+    def cancel_pending_proposal(self, snapshot_id: str, *, principal_id: str,
+                                operation_id: str, occurred_at: str | None = None) -> SnapshotRecord:
+        when = occurred_at or utc_now()
+        with self.transaction() as db:
+            replay = self._snapshot_operation_replay(
+                db, snapshot_id=snapshot_id, target="cancelled", actor_id=principal_id,
+                operation_id=operation_id, event_details={},
             )
-            db.execute("UPDATE snapshot_state SET status=?,actor_id=?,changed_at=?,last_event_id=? "
-                       "WHERE snapshot_id=?", (target, actor_id, occurred_at, event_id, snapshot_id))
+            if replay is not None:
+                return replay
+            row = db.execute(
+                "SELECT s.proposed_by,st.status FROM broker_snapshots s "
+                "JOIN snapshot_state st USING(snapshot_id) WHERE s.snapshot_id=?", (snapshot_id,),
+            ).fetchone()
+            if row is None or row[0] != principal_id:
+                raise BrokerStoreError("proposal is unavailable to this identity")
+            if row[1] != "pending":
+                raise BrokerConflict("only a pending proposal can be cancelled")
+            return self._apply_snapshot_transition(
+                db, snapshot_id, "cancelled", principal_id, when,
+                operation_id=operation_id,
+            )
+
+    def obsolete_pending_proposal(self, snapshot_id: str, superseding_snapshot_id: str, *,
+                                  principal_id: str, operation_id: str,
+                                  occurred_at: str | None = None) -> SnapshotRecord:
+        when = occurred_at or utc_now()
+        event_details = {"superseding_snapshot_id": superseding_snapshot_id}
+        with self.transaction() as db:
+            replay = self._snapshot_operation_replay(
+                db, snapshot_id=snapshot_id, target="obsolete", actor_id=principal_id,
+                operation_id=operation_id, event_details=event_details,
+            )
+            if replay is not None:
+                return replay
+            rows = db.execute(
+                "SELECT s.snapshot_id,s.project_id,s.kind,s.revision_id,s.canonical_digest,"
+                "s.parent_digest,s.proposed_by,st.status FROM broker_snapshots s "
+                "JOIN snapshot_state st USING(snapshot_id) WHERE s.snapshot_id IN (?,?)",
+                (snapshot_id, superseding_snapshot_id),
+            ).fetchall()
+            by_id = {row[0]: row for row in rows}
+            previous, successor = by_id.get(snapshot_id), by_id.get(superseding_snapshot_id)
+            if previous is None or successor is None:
+                raise BrokerStoreError("proposal is unavailable to this identity")
+            if (previous[6] != principal_id or successor[6] != principal_id
+                    or previous[1] != successor[1] or previous[2] != successor[2]):
+                raise BrokerStoreError("proposal is unavailable to this identity or project scope")
+            if previous[7] != "pending" or successor[7] != "pending":
+                raise BrokerConflict("both proposals must be pending for invalidation")
+            if (previous[3] == successor[3] or successor[5] != previous[4]):
+                raise BrokerConflict("superseding proposal does not form a newer linked revision")
+            return self._apply_snapshot_transition(
+                db, snapshot_id, "obsolete", principal_id, when,
+                operation_id=operation_id, event_details=event_details,
+            )
+
+    def expire_pending_proposals(self, *, as_of: datetime | None = None) -> int:
+        """Expire pending proposals after a fixed TTL measured from durable receipt time."""
+        instant = as_of or datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            raise BrokerStoreError("proposal expiry requires a timezone-aware clock")
+        instant = instant.astimezone(timezone.utc)
+        when = instant.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        deadline = instant.timestamp() - PENDING_PROPOSAL_TTL_SECONDS
+        with self.transaction() as db:
+            rows = db.execute(
+                "SELECT s.snapshot_id,e.occurred_at FROM broker_snapshots s "
+                "JOIN snapshot_state st USING(snapshot_id) "
+                "JOIN broker_events e ON e.event_id=st.last_event_id "
+                "WHERE st.status='pending' AND e.event_type='snapshot.proposed'"
+            ).fetchall()
+            expired = 0
+            for row in rows:
+                if _dt(row["occurred_at"]).timestamp() > deadline:
+                    continue
+                snapshot_id = row["snapshot_id"]
+                stable_id = self._proposal_expiry_operation_id(snapshot_id)
+                if db.execute("SELECT 1 FROM broker_snapshots WHERE operation_id=?",
+                              (stable_id,)).fetchone():
+                    raise BrokerIntegrityError("proposal operation conflicts with reserved expiry operation")
+                self._apply_snapshot_transition(
+                    db, snapshot_id, "expired", "broker-expiry-scheduler", when,
+                    operation_id=stable_id, event_details={"reason": "ttl_elapsed"},
+                )
+                expired += 1
+            return expired
 
     def store_intent(self, intent: OperationIntent) -> OperationIntent:
         if not isinstance(intent, OperationIntent):
@@ -917,6 +1328,177 @@ class BrokerStore:
         value["status"] = row[1]
         return RequestRecord(ApprovalRequest.from_dict(value), row[1], row[2])
 
+    def _record_local_consent(self, record, grant=None) -> None:
+        """Atomically persist an immutable local consent decision and optional signed grant."""
+        from agentflow.security.authorization import LocalConsentAuditRecord, LocalGrant
+        from agentflow.security.profile import ConsentDecision
+        if not isinstance(record, LocalConsentAuditRecord):
+            raise BrokerStoreError("typed local consent decision required")
+        if record.decision is ConsentDecision.APPROVE:
+            if (not isinstance(grant, LocalGrant) or not record.explicit_action
+                    or record.operator_identity is None or record.operator_proof_digest is None
+                    or grant.consent_decision_id != record.decision_id
+                    or grant.operation_id != record.operation_id
+                    or grant.request_digest != record.request_digest
+                    or grant.operator_identity != record.operator_identity):
+                raise BrokerStoreError("approved consent requires exactly bound signed grant")
+        elif grant is not None:
+            raise BrokerStoreError("non-approved consent cannot issue grant")
+        if (record.decision is ConsentDecision.REJECT
+                and (not record.explicit_action or record.operator_identity is None
+                     or record.operator_proof_digest is None)):
+            raise BrokerStoreError("rejected consent requires authenticated explicit operator action")
+        with self.transaction() as db:
+            prior = db.execute(
+                "SELECT decision_id,operation_id,decision_json FROM local_consent_decisions "
+                "WHERE request_digest=?", (record.request_digest,),
+            ).fetchone()
+            if prior is not None:
+                from agentflow.security.authorization import LocalConsentAuditRecord
+                existing = LocalConsentAuditRecord.from_json(prior[2])
+                if (existing.decision is not record.decision
+                        or existing.operator_identity != record.operator_identity
+                        or existing.explicit_action != record.explicit_action):
+                    raise BrokerConflict("local consent request replay conflicts with its recorded decision")
+                existing_grant = db.execute(
+                    "SELECT grant_id FROM local_authorization_grants WHERE consent_decision_id=?",
+                    (existing.decision_id,),
+                ).fetchone()
+                return existing_grant[0] if existing_grant else None
+            try:
+                db.execute("INSERT INTO local_consent_decisions VALUES(?,?,?,?,?,?)",
+                           (record.decision_id, record.operation_id, record.request_digest,
+                            record.to_json(), record.record_digest, record.occurred_at))
+                event_id, _ = self._append_event(
+                    db, "local_consent", record.decision_id, "local_consent.decision_recorded",
+                    {"operation_id": record.operation_id, "request_digest": record.request_digest,
+                     "decision": record.decision.value, "record_digest": record.record_digest,
+                     "operator_proof_digest": record.operator_proof_digest,
+                     "status": "approved" if grant is not None else
+                     ("rejected" if record.decision is ConsentDecision.REJECT else "blocked")},
+                    record.occurred_at,
+                )
+                if grant is not None:
+                    db.execute("INSERT INTO local_authorization_grants VALUES(?,?,?,?,?,?,?)",
+                               (grant.grant_id, grant.operation_id, grant.consent_decision_id,
+                                grant.request_digest, grant.to_json(), grant.grant_digest,
+                                grant.expires_at))
+                    grant_event, _ = self._append_event(
+                        db, "local_grant", grant.grant_id, "local_grant.issued",
+                        {"operation_id": grant.operation_id,
+                         "consent_decision_id": grant.consent_decision_id,
+                         "request_digest": grant.request_digest,
+                         "grant_digest": grant.grant_digest, "status": "approved"},
+                        grant.issued_at,
+                    )
+                    db.execute("INSERT INTO local_authorization_state VALUES(?,?,?,?)",
+                               (grant.grant_id, "approved", grant.issued_at, grant_event))
+                    return grant.grant_id
+                return None
+            except sqlite3.IntegrityError as exc:
+                raise BrokerConflict("local consent operation or grant was replayed/conflicted") from exc
+
+    def get_local_consent_by_request(self, request_digest: str):
+        from agentflow.security.authorization import LocalConsentAuditRecord
+        with self._mutex:
+            row = self.db.execute(
+                "SELECT decision_json FROM local_consent_decisions WHERE request_digest=?",
+                (request_digest,),
+            ).fetchone()
+            if row is None:
+                return None
+            record = LocalConsentAuditRecord.from_json(row[0])
+            grant = self.db.execute(
+                "SELECT grant_id FROM local_authorization_grants WHERE consent_decision_id=?",
+                (record.decision_id,),
+            ).fetchone()
+            return record, (grant[0] if grant else None)
+
+    def get_local_grant(self, grant_id: str):
+        from agentflow.security.authorization import LocalGrant
+        with self._mutex:
+            row = self.db.execute(
+                "SELECT g.grant_json,s.status FROM local_authorization_grants g "
+                "JOIN local_authorization_state s USING(grant_id) WHERE g.grant_id=?", (grant_id,)
+            ).fetchone()
+        if row is None:
+            raise BrokerStoreError("local grant not found")
+        try:
+            grant = LocalGrant.from_json(row[0])
+        except Exception as exc:
+            raise BrokerIntegrityError("stored local grant is invalid") from exc
+        return grant, row[1]
+
+    def _transition_local_grant(self, grant_id: str, target: str, reason_code: str,
+                                *, operation_id: str | None = None,
+                                actor_proof_digest: str | None = None) -> str:
+        from agentflow.security.authorization import _digest as _local_digest, _id as _local_id
+        _local_id(grant_id, "grant_id")
+        if target not in {"revoked", "expired", "consumed"}:
+            raise BrokerStoreError("invalid local grant transition")
+        _local_id(reason_code, "grant_transition_reason")
+        operation_id = operation_id or f"local-{target}-{uuid4().hex}"
+        _local_id(operation_id, "grant_transition_operation")
+        with self.transaction() as db:
+            row = db.execute("SELECT status FROM local_authorization_state WHERE grant_id=?",
+                             (grant_id,)).fetchone()
+            if row is None:
+                raise BrokerStoreError("local grant not found")
+            current = row[0]
+            if current == target:
+                event = db.execute(
+                    "SELECT payload_json FROM broker_events WHERE aggregate_type='local_grant' "
+                    "AND aggregate_id=? AND event_type='local_grant.transitioned' "
+                    "ORDER BY sequence DESC LIMIT 1", (grant_id,),
+                ).fetchone()
+                payload = json.loads(event[0]) if event else {}
+                if (payload.get("to") == target
+                        and payload.get("transition_id") == operation_id
+                        and payload.get("reason_code") == reason_code
+                        and payload.get("actor_proof_digest") == actor_proof_digest):
+                    return current
+                raise BrokerConflict("local grant transition replay conflicts with recorded operation")
+            if target not in _LOCAL_GRANT_TRANSITIONS.get(current, set()):
+                raise BrokerConflict("local grant is terminal or transition is invalid")
+            if actor_proof_digest is not None:
+                _local_digest(actor_proof_digest, "actor_proof_digest")
+            grant = db.execute("SELECT operation_id,grant_digest FROM local_authorization_grants WHERE grant_id=?",
+                               (grant_id,)).fetchone()
+            occurred = utc_now()
+            event_id, _ = self._append_event(
+                db, "local_grant", grant_id, "local_grant.transitioned",
+                {"from": current, "to": target, "operation_id": grant[0],
+                 "grant_digest": grant[1], "reason_code": reason_code,
+                 "transition_id": operation_id, "actor_proof_digest": actor_proof_digest}, occurred,
+            )
+            db.execute("UPDATE local_authorization_state SET status=?,changed_at=?,last_event_id=? "
+                       "WHERE grant_id=?", (target, occurred, event_id, grant_id))
+            return target
+
+    def expire_local_grants(self, as_of: str) -> int:
+        _dt(as_of)
+        rows = self.db.execute(
+            "SELECT g.grant_id,g.expires_at,s.status FROM local_authorization_grants g "
+            "JOIN local_authorization_state s USING(grant_id) WHERE s.status='approved' "
+            "ORDER BY g.grant_id"
+        ).fetchall()
+        count = 0
+        for row in rows:
+            if _dt(row[1]) <= _dt(as_of):
+                try:
+                    self._transition_local_grant(row[0], "expired", "grant_expiry")
+                    count += 1
+                except BrokerConflict:
+                    # A concurrent terminal transition wins; never resurrect or retry it.
+                    continue
+        return count
+
+    def local_consent_history(self, decision_id: str) -> tuple[dict, ...]:
+        return self.list_events("local_consent", decision_id)
+
+    def local_grant_history(self, grant_id: str) -> tuple[dict, ...]:
+        return self.list_events("local_grant", grant_id)
+
     def expire_pending_requests(self, as_of: str | None = None) -> int:
         """Deterministically expire only pending requests whose deadline has passed."""
         as_of = as_of or utc_now()
@@ -945,6 +1527,26 @@ class BrokerStore:
         query += " ORDER BY sequence"
         return tuple({**dict(row), "payload": json.loads(row["payload_json"])}
                      for row in self.db.execute(query, args).fetchall())
+
+    def latest_service_lifecycle(self) -> tuple[str, str] | None:
+        """Return the latest persisted Broker service start/stop event, if any."""
+        row = self.db.execute(
+            "SELECT event_type,aggregate_id FROM broker_events "
+            "WHERE aggregate_type='broker_service' "
+            "AND event_type IN ('service.started','service.failed','service.stopped') "
+            "ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def record_service_event(self, event_type: str, instance_id: str, payload: dict) -> str:
+        """Append a bounded, schema-checked local service lifecycle/transport event."""
+        if not _valid_service_event(event_type, "broker_service", instance_id, payload):
+            raise BrokerStoreError("invalid Broker service event")
+        with self.transaction() as db:
+            event_id, _ = self._append_event(
+                db, "broker_service", instance_id, event_type, payload, utc_now()
+            )
+            return event_id
 
     def _transition_request(self, request_id: str, target: str, actor_id: str,
                             occurred_at: str | None = None, *, proof_digest: str | None = None) -> RequestRecord:
@@ -1467,7 +2069,9 @@ class BrokerStore:
             expected_sequence = 1
             projected: dict[tuple[str, str], tuple[str, str]] = {}
             seen_operations: set[str] = set()
+            seen_snapshot_lifecycle_operations: set[str] = set()
             seen_client_operations: set[str] = set()
+            seen_local_grant_transitions: set[str] = set()
             denial_reasons = {
                 "invalid_operation_nonce", "operation_intent_missing_or_divergent",
                 "unknown_client_credential_or_policy", "invalid_clock",
@@ -1495,15 +2099,110 @@ class BrokerStore:
                 current = projected.get(key)
                 event_type = row["event_type"]
                 status = None
-                if event_type == "snapshot.proposed" and key[0] == "snapshot":
+                if event_type == "local_consent.decision_recorded" and key[0] == "local_consent":
+                    expected = {"operation_id", "request_digest", "decision", "record_digest",
+                                "operator_proof_digest", "status"}
+                    if (current is not None or set(payload) != expected
+                            or payload.get("status") not in {"approved", "rejected", "blocked"}
+                            or payload.get("decision") not in {"approve", "reject", "unavailable"}
+                            or (payload["status"] == "approved") != (payload["decision"] == "approve")
+                            or not _is_digest(payload.get("request_digest", ""))
+                            or not _is_digest(payload.get("record_digest", ""))
+                            or (payload.get("operator_proof_digest") is not None
+                                and not _is_digest(payload["operator_proof_digest"]))):
+                        raise BrokerIntegrityError("invalid local consent decision event")
+                    status = payload["status"]
+                elif event_type == "local_grant.issued" and key[0] == "local_grant":
+                    expected = {"operation_id", "consent_decision_id", "request_digest",
+                                "grant_digest", "status"}
+                    consent = self.db.execute(
+                        "SELECT decision_json,record_digest FROM local_consent_decisions WHERE decision_id=?",
+                        (payload.get("consent_decision_id"),),
+                    ).fetchone()
+                    if (current is not None or set(payload) != expected or payload.get("status") != "approved"
+                            or consent is None or not _is_digest(payload.get("request_digest", ""))
+                            or not _is_digest(payload.get("grant_digest", ""))):
+                        raise BrokerIntegrityError("invalid local grant issuance event")
+                    from agentflow.security.authorization import LocalConsentAuditRecord
+                    consent_record = LocalConsentAuditRecord.from_json(consent[0])
+                    if (consent_record.decision.value != "approve"
+                            or consent_record.request_digest != payload["request_digest"]
+                            or consent_record.operation_id != payload["operation_id"]):
+                        raise BrokerIntegrityError("local grant is not linked to approved consent")
+                    status = "approved"
+                elif event_type == "local_grant.transitioned" and key[0] == "local_grant":
+                    expected = {"from", "to", "operation_id", "grant_digest", "reason_code",
+                                "transition_id", "actor_proof_digest"}
+                    target = payload.get("to")
+                    if (set(payload) != expected or current is None or payload.get("from") != current[0]
+                            or target not in _LOCAL_GRANT_TRANSITIONS.get(current[0], set())
+                            or not _is_digest(payload.get("grant_digest", ""))
+                            or not payload.get("operation_id") or not payload.get("transition_id")
+                            or payload["transition_id"] in seen_local_grant_transitions
+                            or (payload.get("actor_proof_digest") is not None
+                                and not _is_digest(payload["actor_proof_digest"]))):
+                        raise BrokerIntegrityError("invalid local grant transition event")
+                    seen_local_grant_transitions.add(payload["transition_id"])
+                    status = target
+                elif event_type == "snapshot.proposed" and key[0] == "snapshot":
                     if current is not None or payload.get("status") != "pending":
                         raise BrokerIntegrityError("invalid snapshot proposal event sequence")
+                    proposal_operation = payload.get("operation_id")
+                    if (type(proposal_operation) is not str or not proposal_operation
+                            or proposal_operation in seen_snapshot_lifecycle_operations):
+                        raise BrokerIntegrityError("snapshot proposal operation identity is invalid")
                     status = "pending"
                 elif event_type == "snapshot.status_changed" and key[0] == "snapshot":
                     target = payload.get("to")
                     if (current is None or payload.get("from") != current[0]
                             or target not in _SNAPSHOT_TRANSITIONS.get(current[0], set())):
                         raise BrokerIntegrityError("invalid snapshot state event sequence")
+                    if target in {"expired", "cancelled", "obsolete"}:
+                        operation_id = payload.get("operation_id")
+                        actor_id = payload.get("actor_id")
+                        requires_operation = target in {"cancelled", "obsolete"} or operation_id is not None
+                        if (type(actor_id) is not str or not actor_id
+                                or (requires_operation and (type(operation_id) is not str or not operation_id
+                                    or operation_id in seen_snapshot_lifecycle_operations))):
+                            raise BrokerIntegrityError("terminal proposal event lacks unique actor/operation")
+                        if (operation_id is not None and self.db.execute(
+                                "SELECT 1 FROM broker_snapshots WHERE operation_id=?",
+                                (operation_id,)).fetchone()):
+                            raise BrokerIntegrityError("proposal lifecycle operation ID was reused")
+                        proposal_owner = self.db.execute(
+                            "SELECT proposed_by FROM broker_snapshots WHERE snapshot_id=?",
+                            (key[1],),
+                        ).fetchone()
+                        if proposal_owner is None:
+                            raise BrokerIntegrityError("proposal lifecycle event has no proposal")
+                        if target in {"cancelled", "obsolete"} and actor_id != proposal_owner[0]:
+                            raise BrokerIntegrityError("proposal lifecycle actor is not its owner")
+                        if target == "expired" and operation_id is not None:
+                            stable_operation = self._proposal_expiry_operation_id(key[1])
+                            if (actor_id != "broker-expiry-scheduler"
+                                    or operation_id != stable_operation
+                                    or payload.get("reason") != "ttl_elapsed"):
+                                raise BrokerIntegrityError("proposal expiry event is not canonical")
+                        if target == "obsolete":
+                            successor_id = payload.get("superseding_snapshot_id")
+                            successor = self.db.execute(
+                                "SELECT project_id,kind,revision_id,parent_digest,canonical_digest,proposed_by "
+                                "FROM broker_snapshots WHERE snapshot_id=?", (successor_id,),
+                            ).fetchone()
+                            previous_snapshot = self.db.execute(
+                                "SELECT project_id,kind,revision_id,canonical_digest,proposed_by "
+                                "FROM broker_snapshots WHERE snapshot_id=?", (key[1],),
+                            ).fetchone()
+                            if (successor is None or previous_snapshot is None
+                                    or successor[0] != previous_snapshot[0]
+                                    or successor[1] != previous_snapshot[1]
+                                    or successor[2] == previous_snapshot[2]
+                                    or successor[3] != previous_snapshot[3]
+                                    or successor[5] != previous_snapshot[4]
+                                    or actor_id != previous_snapshot[4]):
+                                raise BrokerIntegrityError("obsolete proposal lacks a valid successor link")
+                        if operation_id is not None:
+                            seen_snapshot_lifecycle_operations.add(operation_id)
                     status = target
                 elif event_type == "approval_request.created" and key[0] == "request":
                     if current is not None or payload.get("status") != "pending":
@@ -1621,6 +2320,9 @@ class BrokerStore:
                                       "webauthn_challenge.recovered_unknown"} and type(payload.get("reason")) is not str:
                         raise BrokerIntegrityError("WebAuthn challenge terminal event lacks a reason code")
                     status = target
+                elif event_type in _SERVICE_EVENT_FIELDS:
+                    if not _valid_service_event(event_type, key[0], key[1], payload):
+                        raise BrokerIntegrityError("invalid Broker service lifecycle event")
                 else:
                     raise BrokerIntegrityError("unknown Broker event type")
                 if status is not None:
@@ -1684,6 +2386,62 @@ class BrokerStore:
                         or binding.expires_at != row[3]
                         or projected.get(("webauthn_challenge", row[0])) != (row[4], row[5])):
                     raise BrokerIntegrityError("WebAuthn challenge state diverges from immutable binding/events")
+            from agentflow.security.authorization import LocalConsentAuditRecord, LocalGrant
+            for row in self.db.execute(
+                "SELECT decision_id,operation_id,request_digest,decision_json,record_digest "
+                "FROM local_consent_decisions"
+            ):
+                record = LocalConsentAuditRecord.from_json(row[3])
+                event = self.db.execute(
+                    "SELECT payload_json FROM broker_events WHERE aggregate_type='local_consent' "
+                    "AND aggregate_id=? AND event_type='local_consent.decision_recorded'", (row[0],)
+                ).fetchone()
+                journal_payload = json.loads(event[0]) if event is not None else None
+                expected_status = ("approved" if record.decision.value == "approve" else
+                                   "rejected" if record.decision.value == "reject" else "blocked")
+                grant_count = self.db.execute(
+                    "SELECT COUNT(*) FROM local_authorization_grants WHERE consent_decision_id=?",
+                    (record.decision_id,),
+                ).fetchone()[0]
+                if (tuple((record.decision_id, record.operation_id, record.request_digest,
+                           record.record_digest)) != tuple((row[0], row[1], row[2], row[4]))
+                        or journal_payload is None
+                        or journal_payload != {
+                            "operation_id": record.operation_id,
+                            "request_digest": record.request_digest,
+                            "decision": record.decision.value,
+                            "record_digest": record.record_digest,
+                            "operator_proof_digest": record.operator_proof_digest,
+                            "status": expected_status,
+                        }
+                        or (record.decision.value == "approve"
+                            and (not record.explicit_action or not record.operator_identity
+                                 or not record.operator_proof_digest or grant_count != 1))
+                        or (record.decision.value != "approve" and grant_count != 0)):
+                    raise BrokerIntegrityError("local consent record diverges from journal")
+            for row in self.db.execute(
+                "SELECT g.grant_id,g.operation_id,g.consent_decision_id,g.request_digest,g.grant_json,"
+                "g.grant_digest,g.expires_at,s.status,s.changed_at,s.last_event_id "
+                "FROM local_authorization_grants g JOIN local_authorization_state s USING(grant_id)"
+            ):
+                grant = LocalGrant.from_json(row[4])
+                issuance = self.db.execute(
+                    "SELECT payload_json FROM broker_events WHERE aggregate_type='local_grant' "
+                    "AND aggregate_id=? AND event_type='local_grant.issued'", (row[0],)
+                ).fetchone()
+                if (tuple((grant.grant_id, grant.operation_id, grant.consent_decision_id,
+                           grant.request_digest, grant.grant_digest, grant.expires_at))
+                        != tuple((row[0], row[1], row[2], row[3], row[5], row[6]))
+                        or issuance is None
+                        or json.loads(issuance[0]) != {
+                            "operation_id": grant.operation_id,
+                            "consent_decision_id": grant.consent_decision_id,
+                            "request_digest": grant.request_digest,
+                            "grant_digest": grant.grant_digest,
+                            "status": "approved",
+                        }
+                        or projected.get(("local_grant", row[0])) != (row[7], row[9])):
+                    raise BrokerIntegrityError("local grant state diverges from immutable record/journal")
             for row in self.db.execute("SELECT * FROM broker_snapshots"):
                 proposal = SnapshotProposal(
                     PROTOCOL_VERSION, row["snapshot_id"], row["kind"], row["project_id"],
@@ -1926,8 +2684,8 @@ class BrokerStore:
         """Revert v2/v3 additive identity tables only while no Broker history exists."""
         with self.transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (2, 3):
-                raise BrokerStoreError("identity schema rollback requires Broker schema v2 or v3")
+            if version not in (2, 3, 4, 5):
+                raise BrokerStoreError("identity schema rollback requires Broker schema v2 through v5")
             if db.execute("SELECT 1 FROM broker_events LIMIT 1").fetchone():
                 raise BrokerStoreError("cannot roll back identity schema after Broker history exists")
             triggers = db.execute(
@@ -1940,9 +2698,13 @@ class BrokerStore:
             ).fetchall()
             for row in triggers:
                 db.execute(f'DROP TRIGGER "{row[0]}"')
+            if version == 5:
+                for name in ("local_authorization_state", "local_authorization_grants",
+                             "local_consent_decisions"):
+                    db.execute(f'DROP TABLE "{name}"')
             for row in indexes:
                 db.execute(f'DROP INDEX "{row[0]}"')
-            if version == 3:
+            if version >= 3:
                 for table in ("webauthn_challenge_state", "webauthn_challenges",
                               "webauthn_credential_state", "webauthn_credentials"):
                     db.execute(f'DROP TABLE "{table}"')
@@ -1952,10 +2714,22 @@ class BrokerStore:
             db.execute("PRAGMA user_version=1")
 
     def rollback_webauthn_schema_if_empty(self) -> None:
-        """Revert v3 to v2 only before any event or WebAuthn record exists."""
+        """Test-only rollback to v2 while the entire Broker journal remains empty."""
         with self.transaction() as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 3:
-                raise BrokerStoreError("WebAuthn schema rollback requires Broker schema v3")
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version == 5:
+                if db.execute("SELECT 1 FROM broker_events LIMIT 1").fetchone():
+                    raise BrokerStoreError("cannot roll back schema after Broker history exists")
+                for name in ("local_authorization_state", "local_authorization_grants",
+                             "local_consent_decisions"):
+                    db.execute(f'DROP TABLE "{name}"')
+                for name in ("local_consent_immutable_update", "local_consent_immutable_delete",
+                             "local_grants_immutable_update", "local_grants_immutable_delete"):
+                    db.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+                db.execute("PRAGMA user_version=4")
+                version = 4
+            if version not in (3, 4):
+                raise BrokerStoreError("WebAuthn schema rollback requires Broker schema v3 or later")
             if db.execute("SELECT 1 FROM broker_events LIMIT 1").fetchone():
                 raise BrokerStoreError("cannot roll back WebAuthn schema after Broker history exists")
             for table in ("webauthn_challenge_state", "webauthn_challenges",
@@ -1964,7 +2738,7 @@ class BrokerStore:
             for name in ("webauthn_credentials_no_update", "webauthn_credentials_no_delete",
                          "webauthn_challenges_no_update", "webauthn_challenges_no_delete"):
                 db.execute(f'DROP TRIGGER IF EXISTS "{name}"')
-            db.execute("PRAGMA user_version=2")
+        db.execute("PRAGMA user_version=2")
 
 
 def _is_digest(value: str) -> bool:

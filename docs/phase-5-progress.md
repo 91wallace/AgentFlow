@@ -96,13 +96,20 @@ Adicionar evidência por tarefa após cada implementação e teste relevante. Fa
 
 - PR #5 executou o workflow `CI` em duplicidade (eventos `push` e `pull_request`). Os dois conjuntos falharam nos três jobs Python 3.11, 3.12 e 3.13 no teste `test_local_runtime_bounds_logs_and_hashes_the_full_stream`.
 - Os logs dos jobs mostraram que o coletor contou os bytes reais no Linux (`200001`), enquanto a expectativa do teste codificava CRLF (`200002`). A diferença era somente a newline de `print`; não houve defeito no limite nem no digest do stream.
-- Regressão corrigida em `tests/test_phase5_runtime.py`: expectativa agora usa `os.linesep`, mantendo validação exata de tamanho e SHA-256 sob Windows/Linux. O teste focado passou localmente (1 teste) e a suíte completa pós-correção passou (181 testes em 222,09 s). Novo commit e nova CI serão publicados antes de concluir a homologação.
+- Regressão corrigida em `tests/test_phase5_runtime.py`: expectativa agora usa `os.linesep`, mantendo validação exata de tamanho e SHA-256 sob Windows/Linux. O teste focado passou localmente (1 teste) e a suíte completa pós-correção passou (181 testes em 222,09 s). Os commits de correção e registro foram publicados; os seis checks passaram novamente.
 
 ### Homologação remota
 
-- PR #5: https://github.com/91wallace/AgentFlow/pull/5 — aberto, alvo `main`.
+- PR #5: https://github.com/91wallace/AgentFlow/pull/5 — integrado em `main` sem reescrita de histórico.
 - Base: `8ec623813709d71b98fbd0be7e8fba87ebb9d565`; implementação revisada e CI homologada em `ff10ef5ce495cb9466498ccaf5da7c61b729a357`.
 - Workflow acionado pelo push: [run 42075467307](https://github.com/91wallace/AgentFlow/actions/runs/42075467307): `test (3.11)`, `test (3.12)` e `test (3.13)` passaram.
 - Workflow acionado pelo pull request: [run 42075480855](https://github.com/91wallace/AgentFlow/actions/runs/42075480855): `test (3.11)`, `test (3.12)` e `test (3.13)` passaram.
+- Commit final com registro dos resultados: `51db15a06672c9ffa1b3f4ac2914410ee4d10b08`; [workflow push](https://github.com/91wallace/AgentFlow/actions/runs/42075751303) e [workflow pull request](https://github.com/91wallace/AgentFlow/actions/runs/42075759926) também passaram individualmente em Python 3.11, 3.12 e 3.13.
 - Em ambos, o workflow CI executou em `ubuntu-latest`, instalou `.[test]`, rodou `python -m pytest -q` e `agentflow --version`. A primeira tentativa havia exposto somente a expectativa de newline específica do teste; a regressão foi corrigida e os seis jobs subsequentes passaram.
 - Docker real, agentes reais, entrega e deploy não foram executados; Windows não faz parte da matriz remota atual. O ambiente local de homologação foi Windows/Python 3.13.
+
+### Encerramento formal da Fase 5
+
+- PR #5 foi merged em 2026-11-05 usando merge commit, sem rebase/squash: `bf558211a80038efddde36332d8c09a8157cd903` (pais `8ec623813709d71b98fbd0be7e8fba87ebb9d565` e `51db15a06672c9ffa1b3f4ac2914410ee4d10b08`).
+- Após `git fetch origin main`, `origin/main` foi confirmado em `bf558211a80038efddde36332d8c09a8157cd903`, igual ao `mergeCommit` retornado pelo GitHub. PR #5 está `MERGED`; os seis checks Python 3.11/3.12/3.13 permanecem aprovados.
+- Esta atualização e o planejamento F6 são locais, sem commit/push; arquivos preexistentes e `autonomous-development-runner/` continuam preservados.

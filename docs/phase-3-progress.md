@@ -14,3 +14,7 @@ Base: merge da Fase 2 em `origin/main` (`c82ece560f2d1bf618d2f80e29c15a40ea19444
 | F3-08 | Concluída | Resultado do processo separado da validação; conclusão exige evidências verificadas para cada critério da revisão; 6 testes de persistência aprovados. |
 | F3-09 | Concluída | `recover` reconcilia reservas; tentativas vivas verificam PID/criação/grupo e continuam bloqueando; `cancel` sinaliza a tentativa e só encerra processo cuja identidade confere; reabertura repetida é idempotente. |
 | F3-10 | Concluída | CLI explícita `execute`, `cancel`, `recover`, `cleanup`; 78 testes locais aprovados em Python 3.13 e smoke do pacote instalado aprovado. Commit `5e5eab6`: jobs Python 3.11, 3.12 e 3.13 aprovados no CI do PR #3 (run `42021618875`). Falhas anteriores de mock no CLI e classificação de erro após spawn foram corrigidas e cobertas por regressão. |
+
+## Encerramento da Fase 3
+
+PR #3 foi integrado sem reescrita de histórico. O head homologado permaneceu `8f97cd7c6f657153c5f92934ad885d8e1659bf1c`; merge commit `edb7c4f7f0e672d8d1432d2d8948c3b49b7f4b91`. Checks obrigatórios: Python 3.11, 3.12 e 3.13 aprovados. A suíte local reportou 78 testes aprovados em Python 3.13. Nenhum agente real foi executado.

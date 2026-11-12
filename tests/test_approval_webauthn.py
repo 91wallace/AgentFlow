@@ -80,12 +80,12 @@ def _assertion(private_key, credential, challenge, *, origin=ORIGIN, flags=0x05,
                             data, auth_data, signature)
 
 
-def test_schema_v3_migration_rollback_and_integrity(tmp_path, monkeypatch):
+def test_schema_v4_migration_rollback_and_integrity(tmp_path, monkeypatch):
     import agentflow.approval.persistence as persistence
 
     path = tmp_path / "broker.sqlite"
     store = BrokerStore(path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     store.rollback_webauthn_schema_if_empty()
     store.close()
     with sqlite3.connect(path) as db:
@@ -101,7 +101,7 @@ def test_schema_v3_migration_rollback_and_integrity(tmp_path, monkeypatch):
         assert db.execute("SELECT name FROM sqlite_master WHERE name='partial_v3'").fetchone() is None
     monkeypatch.setattr(persistence, "_SCHEMA_V3", original)
     with BrokerStore(path) as reopened:
-        assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
         reopened.verify_integrity()
 
 
