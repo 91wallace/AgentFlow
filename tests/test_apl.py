@@ -207,9 +207,9 @@ def _persisted_attempt(state_path, tmp_path, *, interrupted=False, validated=Tru
         store.import_plan(plan)
         current = next(item for item in store.list_tasks() if item.task_id == "first")
         request = ExecutionRequest("sample", "first", current.definition_revision, definition, "synthetic-op",
-                                   workspace, "synthetic", ExecutionPolicy(sandbox="read-only", approval="never"),
+                                   workspace, "synthetic", ExecutionPolicy(approval="never"),
                                    (("ok", "works"),))
-        spec = ProcessSpec(Path("synthetic"), (), workspace, "synthetic", (), "fake", "1", "read-only", "never")
+        spec = ProcessSpec(Path("synthetic"), (), workspace, "synthetic", (), "fake", "1", "unknown", "never")
         attempt = store.prepare(request, spec, "test")
         if interrupted:
             store.reconcile_interrupted()

@@ -2,7 +2,7 @@
 
 ## MVP-01 — integração
 
-**Bloqueada para execução automática real.** O comando existente `agentflow execute` aceita uma tarefa por solicitação, exige sandbox/aprovação explicitamente configurados, reserva em `ExecutionStore`, e deixa validação/evidência verificável em fluxos separados de checkpoint e `ValidationScheduler`. O roadmap atual mantém seleção/dispatch de Fase 7 e autorização operacional Broker/TEG fail-closed; RB-09C.2 não foi iniciada. Encadear esses serviços pelo APL criaria repetição automática de execução e dependeria de autorização/binding/auditoria ainda não homologados. Não se implementou esse caminho nem bypass.
+**Registro histórico do MVP-01.** Naquele checkpoint, `agentflow execute` exigia configuração explícita do sandbox. A política vigente, atualizada em 2026-11-14, removeu a seleção/validação de sandbox do AgentFlow: o Codex usa sua configuração nativa, enquanto os gates operacionais próprios continuam aplicados. O restante deste checkpoint preserva o estado histórico das fases e seus bloqueios.
 
 ## MVP-02 — CLI
 
@@ -36,7 +36,7 @@ Preflight de 0.167.0 passou; corrigida posição de opção global `--ask-for-ap
 
 ## MVP-13.2 — planner real recuperado
 
-Workspace agora usa Git sintético real validado por `rev-parse`, sem commit/remotes, e Codex recebe trust override por uma invocação somente para essa raiz temporária (`--config projects.<path>.trust_level="trusted"`). Uma solicitação real Codex 0.167.0 retornou JSONL, decoder e validador aceitaram a proposta, persistida como `proposed` com eventos `started/succeeded`. Sem aceite/revisão nova e zero tentativas de job. Suíte completa 446 passou; sem alteração de config global ou execução de jobs. Ver `docs/apl-mvp13-2-real-codex-planner-recovery.md`.
+Registro histórico MVP-13.2: workspace Git sintético sem remotes, com trust override de invocação, produziu uma proposta real Codex 0.167.0 persistida e validada; nenhum job foi executado. **Política vigente 2026-11-14:** esse `--config` de confiança foi removido. Ver a nota de manutenção em `docs/apl-mvp13-2-real-codex-planner-recovery.md`.
 
 ## Uso seguro e diagnóstico
 
@@ -58,4 +58,6 @@ agentflow apl inspect --path . --cycle-id <id>
 
 Um resultado associado deve corresponder ao próximo job, ter status do processo `process_succeeded`, validação `validation_passed` e evidências `verified` para todos os critérios. Texto livre nunca é aceito como evidência. `unknown` bloqueia e não pode ser retomado. Ciclos não iniciam providers. Para consultar ciclo persistido: `agentflow apl status --path .`; `agentflow apl history --path . --cycle-id <id>`; `agentflow apl inspect --path . --cycle-id <id>`.
 
-Para execução de tarefa individual continuam valendo as condições, escopo, sandbox, aprovação e validação documentados pelo comando existente `agentflow execute`; APL não transforma essa operação em autorização para loop. Limite de custo APL é custo reportado pelo adaptador, não teto financeiro garantido por provider. Ciclos desconhecidos/ambíguos permanecem bloqueados. Fase 7, Broker/TEG operacional, providers reais via APL e release permanecem não homologados.
+Para execução de tarefa individual continuam valendo escopo, aprovação, timeout e validação documentados por `agentflow execute`; sandbox pertence à configuração nativa do CLI. APL não transforma essa operação em autorização para loop. Limite de custo APL é custo reportado pelo adaptador, não teto financeiro garantido por provider. Ciclos desconhecidos/ambíguos permanecem bloqueados. Fase 7, Broker/TEG operacional, providers reais via APL e release permanecem não homologados.
+
+**Política vigente de adapters (2026-11-14):** AgentFlow não injeta `--sandbox` ou `--config` no Codex e não exige sandbox genérico para outros adapters. Registros históricos MVP-13.1/MVP-13.2 documentam argumentos usados naquela homologação; estes não representam a política atual.

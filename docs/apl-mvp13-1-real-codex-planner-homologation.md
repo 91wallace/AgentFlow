@@ -61,3 +61,5 @@ O decoder e `validate_proposal` não foram alcançados na chamada real; logo, MV
 Codex CLI executa sob a identidade do usuário e pode ter acesso às permissões/credenciais do ambiente; `read-only`, workspace temporário e instruções não provam isolamento de filesystem, rede, ferramentas ou credenciais. Configuração global do Codex, Broker/TEG, RB-09C, Production Mode, RestrictedInferenceHarness e dispatch automático permaneceram inalterados.
 
 Para nova homologação é necessário um mecanismo autorizado que permita confiar somente no workspace sintético desta execução sem alterar a configuração global nem ignorar o gate de confiança. Até que exista esse caminho, não repetir chamadas reais. Não habilitar inferência real para ciclos de trabalho nem execução automática.
+
+**Nota de manutenção (2026-11-14):** os argumentos `--sandbox read-only` acima descrevem fielmente o experimento histórico MVP-13.1; não são a política atual. AgentFlow agora não injeta `--sandbox` ou `--config` e deixa o sandbox inteiramente ao Codex CLI. A configuração nativa é herdada e o modo efetivo fica registrado como `unknown`.

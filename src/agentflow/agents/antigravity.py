@@ -52,10 +52,10 @@ class AntigravityAdapter:
         selection = request.model_selection
         if selection is None or selection.mode != "manual" or selection.agent_id != self.adapter_id:
             raise ExecutionError("Antigravity exige seleção explícita de modelo por tentativa")
-        # Codex's named sandbox/approval levels do not map to Antigravity semantics.
-        # Inherit the user's settings unchanged; block requests that imply a mapping.
-        if request.policy.sandbox is not None or request.policy.approval is not None:
-            raise ExecutionError("política sandbox/aprovação não mapeável com equivalência comprovada")
+        # Native execution settings belong to this agent CLI; AgentFlow does not
+        # inject or translate sandbox modes into the invocation.
+        if request.policy.approval is not None:
+            raise ExecutionError("política de aprovação não mapeável com equivalência comprovada")
         if not request.workspace.is_dir() or not (request.workspace / ".git").exists():
             raise ExecutionError("workspace Git inválido")
         version_output = self._probe("--version")
@@ -85,7 +85,7 @@ class AntigravityAdapter:
             request.workspace.resolve(), message, (), self.adapter_id, version,
             "unknown", "unknown",
             ("headless", "stream-json", "manual-model", "model-inventory-checked",
-             "permission-mode-observable", "sandbox-enforcement-unknown",
+             "permission-mode-observable", "native-sandbox-config-unmodified",
              "network-enforcement-unknown"), self.api_version,
             selection.provider_id, model)
 

@@ -21,6 +21,7 @@ from uuid import uuid4
 from .profile import (
     ConsentDecision,
     ConsentLimits,
+    LocalExecutionConsentRequest,
     LocalConsentReceipt,
     LocalConsentRequest,
     ProfileConfigurationError,
@@ -248,10 +249,22 @@ class LocalGrant:
     key_id: str
     grant_digest: str
     signature_b64: str
+    execution_binding: dict | None = None
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
             raise LocalAuthorizationError("local_grant_schema_unsupported")
+        if ((self.schema_version == 1 and self.execution_binding is not None)
+                or (self.schema_version == 2
+                    and (type(self.execution_binding) is not dict
+                         or not self.execution_binding))):
+            raise LocalAuthorizationError("local_grant_execution_binding_invalid")
+        if self.schema_version == 2:
+            try:
+                from .profile import ExecutionPlanConsentBinding
+                ExecutionPlanConsentBinding.from_payload(self.execution_binding)
+            except Exception as exc:
+                raise LocalAuthorizationError("local_grant_execution_binding_invalid") from exc
         if self.profile is not SecurityProfile.LOCAL_SUPERVISED:
             raise LocalAuthorizationError("local_grant_profile_invalid")
         for name in ("grant_id", "operation_id", "consent_decision_id", "proposal_id",
@@ -276,7 +289,7 @@ class LocalGrant:
             raise LocalAuthorizationError("grant_digest_or_signature_invalid")
 
     def signing_payload(self) -> dict:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "profile": self.profile.value,
             "grant_id": self.grant_id,
@@ -294,6 +307,9 @@ class LocalGrant:
             "expires_at": self.expires_at,
             "key_id": self.key_id,
         }
+        if self.schema_version == 2:
+            payload["execution_binding"] = self.execution_binding
+        return payload
 
     def digest_payload_hash(self) -> str:
         return _hash(self.signing_payload())
@@ -314,6 +330,8 @@ class LocalGrant:
                     "request_digest", "proposal_id", "plan_digest", "revision", "workspace_id",
                     "allowed_operations", "limits", "operator_identity", "issued_at", "expires_at",
                     "key_id", "grant_digest", "signature_b64"}
+        if type(value) is dict and value.get("schema_version") == 2:
+            expected.add("execution_binding")
         if type(value) is not dict or set(value) != expected:
             raise LocalAuthorizationError("local_grant_fields_mismatch")
         limits = value["limits"]
@@ -332,6 +350,7 @@ class LocalGrant:
                               limits["budget_currency"]),
                 value["operator_identity"], value["issued_at"], value["expires_at"],
                 value["key_id"], value["grant_digest"], value["signature_b64"],
+                value.get("execution_binding"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, LocalAuthorizationError):
@@ -348,8 +367,9 @@ class LocalGrant:
 
 
 def _build_signed_grant(*, signer: LocalGrantSigner, **fields) -> LocalGrant:
+    schema_version = fields.pop("schema_version", 1)
     payload = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "profile": SecurityProfile.LOCAL_SUPERVISED.value,
         **fields,
         "limits": _limits_payload(fields["limits"]),
@@ -358,11 +378,12 @@ def _build_signed_grant(*, signer: LocalGrantSigner, **fields) -> LocalGrant:
     grant_digest = _hash(payload)
     signature = signer.sign_digest(grant_digest)
     return LocalGrant(
-        1, SecurityProfile.LOCAL_SUPERVISED, fields["grant_id"], fields["operation_id"],
+        schema_version, SecurityProfile.LOCAL_SUPERVISED, fields["grant_id"], fields["operation_id"],
         fields["consent_decision_id"], fields["request_digest"], fields["proposal_id"],
         fields["plan_digest"], fields["revision"], fields["workspace_id"],
         fields["allowed_operations"], fields["limits"], fields["operator_identity"],
         fields["issued_at"], fields["expires_at"], signer.key_id, grant_digest, _b64(signature),
+        fields.get("execution_binding"),
     )
 
 
@@ -551,14 +572,15 @@ def local_consent_challenge_digest(request: LocalConsentRequest,
 
 
 class LocalAuthorizationAuthority:
-    """Explicit local authority object; never installed/wired by the app by default."""
+    """Explicit LOCAL_SUPERVISED signer; never installed by default."""
 
     def __init__(self, *, store, policy: LocalAuthorityPolicy,
                  proposal_resolver: LocalProposalResolver,
                  operator_authenticator: LocalOperatorAuthenticator,
                  consumer_authenticator: LocalConsumerAuthenticator,
                  signer: LocalGrantSigner, verifier: LocalGrantVerifier,
-                 authentication_challenge_store=None):
+                 authentication_challenge_store=None,
+                 execution_binding_resolver=None):
         from agentflow.approval.persistence import BrokerStore
         if not isinstance(store, BrokerStore):
             raise LocalAuthorizationError("BrokerStore_required")
@@ -574,6 +596,7 @@ class LocalAuthorizationAuthority:
         self.signer = signer
         self.verifier = verifier
         self.authentication_challenge_store = authentication_challenge_store
+        self.execution_binding_resolver = execution_binding_resolver
 
     def _now(self, now: datetime | None) -> datetime:
         instant = now or datetime.now(timezone.utc)
@@ -620,6 +643,17 @@ class LocalAuthorizationAuthority:
                 or proposal.revision != request.revision or proposal.workspace_id != request.workspace_id
                 or not set(request.allowed_operations).issubset(set(proposal.allowed_operations))):
             raise LocalAuthorizationError("consent_proposal_binding_mismatch")
+        execution_binding = None
+        if isinstance(request, LocalExecutionConsentRequest):
+            if not callable(self.execution_binding_resolver):
+                raise LocalAuthorizationError("authoritative_execution_binding_unavailable")
+            try:
+                current_binding = self.execution_binding_resolver(request.proposal_id)
+            except Exception as exc:
+                raise LocalAuthorizationError("authoritative_execution_binding_unavailable") from exc
+            if current_binding != request.execution_binding:
+                raise LocalAuthorizationError("execution_plan_binding_changed")
+            execution_binding = request.execution_binding.to_payload()
         self.policy.validate_limits(request.limits)
         if request.operator_identity not in self.policy.allowed_operator_principals:
             raise LocalAuthorizationError("requested_operator_not_allowlisted")
@@ -677,6 +711,7 @@ class LocalAuthorizationAuthority:
                       issued + timedelta(seconds=self.policy.max_grant_ttl_seconds))
         grant_id = "local-grant-" + uuid4().hex
         fields = {
+            "schema_version": 2 if execution_binding is not None else 1,
             "grant_id": grant_id, "operation_id": operation_id,
             "consent_decision_id": decision_id, "request_digest": request.request_digest,
             "proposal_id": proposal.proposal_id, "plan_digest": proposal.plan_digest,
@@ -685,6 +720,8 @@ class LocalAuthorizationAuthority:
             "operator_identity": operator.principal_id, "issued_at": _stamp(issued),
             "expires_at": _stamp(expires),
         }
+        if execution_binding is not None:
+            fields["execution_binding"] = execution_binding
         grant = _build_signed_grant(signer=self.signer, **fields)
         record = LocalConsentAuditRecord.create(
             decision_id=decision_id, operation_id=operation_id,
@@ -702,6 +739,16 @@ class LocalAuthorizationAuthority:
         return LocalAuthorizationOutcome(ConsentDecision.APPROVE, decision_id,
                                          grant.grant_id, grant.grant_digest,
                                          "approved", "local_grant_issued_not_dispatched")
+
+    def authorize_execution_plan(self, request: LocalExecutionConsentRequest,
+                                 receipt: LocalConsentReceipt, proof: object, *,
+                                 authentication_challenge=None,
+                                 now: datetime | None = None) -> LocalAuthorizationOutcome:
+        """Authenticate and persist one grant bound to the entire immutable plan."""
+        if not isinstance(request, LocalExecutionConsentRequest):
+            raise LocalAuthorizationError("execution_plan_consent_request_required")
+        return self.authorize(request, receipt, proof,
+                              authentication_challenge=authentication_challenge, now=now)
 
     def record_cancelled(self, request: LocalConsentRequest, *,
                          now: datetime | None = None) -> LocalAuthorizationOutcome:

@@ -107,7 +107,7 @@ def test_prepare_requires_explicit_provider_and_model(tmp_path, selection):
         adapter(tmp_path).prepare(request(tmp_path, selection=selection))
 
 
-def test_prepare_blocks_sandbox_policies_and_does_not_forward_credentials(tmp_path, monkeypatch):
+def test_prepare_preserves_native_sandbox_and_does_not_forward_credentials(tmp_path, monkeypatch):
     secret = "real-looking-test-secret-never-used"
     monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
     environments = []
@@ -115,10 +115,9 @@ def test_prepare_blocks_sandbox_policies_and_does_not_forward_credentials(tmp_pa
     def capture(command, **kwargs):
         environments.append(kwargs["env"])
         return base(command, **kwargs)
-    with pytest.raises(ExecutionError, match="não atesta enforcement"):
-        adapter(tmp_path, capture).prepare(request(
-            tmp_path, policy=ExecutionPolicy(sandbox="workspace-write")))
-    adapter(tmp_path, capture).prepare(request(tmp_path))
+    spec = adapter(tmp_path, capture).prepare(request(tmp_path))
+    assert "--sandbox" not in spec.arguments
+    assert spec.effective_sandbox == "unknown"
     assert environments and all(secret not in env.values() for env in environments)
 
 

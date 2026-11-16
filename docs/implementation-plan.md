@@ -154,7 +154,7 @@ Escopo autorizado: executor local Codex CLI para uma tarefa solicitada explicita
 | ID | Tarefa planejada | Dependências | Critério de aceite verificável |
 | --- | --- | --- | --- |
 | F3-01 | Revisar e aprovar ADR 0003; validar valores, capacidades concretas do Codex, cancelamento por plataforma e configuração efetiva. | Fase 2 | ADR aprovado com tabela de versão/capacidade testada e erros de pré-checagem; nenhum sandbox ou aprovação é ativado automaticamente. |
-| F3-02 | Definir `ExecutionRequest`, `ExecutionResult`, `AgentAdapter`, `ProcessRuntime`, políticas efetivas e erros de domínio. | F3-01 | Núcleo importa apenas protocolos; adaptadores simulados substituem Codex; pedido inclui revisão, ID idempotente e configuração efetiva, inclusive `danger-full-access` quando escolhida. |
+| F3-02 | Definir `ExecutionRequest`, `ExecutionResult`, `AgentAdapter`, `ProcessRuntime`, políticas operacionais e erros de domínio. | F3-01 | Núcleo importa apenas protocolos; adaptadores simulados substituem Codex; pedido inclui revisão, ID idempotente e limites operacionais. Configuração nativa de sandbox não é parte da política AgentFlow nem é transmitida pelo contrato comum. |
 | F3-03 | Implementar migração SQLite v2 de tentativas/eventos, índice de uma tentativa ativa e backup consistente. | F3-02 | Reabertura v1→v2 preserva tarefas/evidências; falha de backup/migração mantém v1; tentativas referenciam revisão correta; versão futura é recusada. |
 | F3-04 | Implementar pré-checagem, reserva e tentativa `prepared` atômicas, com teto de três tentativas. | F3-03 | Disputa entre processos cria uma tentativa ativa; pedido idêntico retorna a mesma; divergente falha; pré-checagem falha sem spawn; `prepared` consome uma tentativa. |
 | F3-05 | Implementar runtime local independente do Codex, com identidade verificável, limites, logs incrementais e cancelamento de árvore Windows/Linux. | F3-02, F3-04 | Processos falsos cobrem timeout de 1800 s configurável, limite de log, SIGTERM/SIGKILL no Linux e Job Object no Windows; PID reutilizado não é aceito como identidade. |
@@ -166,7 +166,7 @@ Escopo autorizado: executor local Codex CLI para uma tarefa solicitada explicita
 
 ### Matriz de testes proposta
 
-- **Contratos/adaptador:** versões e flags reais/incompatíveis, configuração herdada versus explícita, `danger-full-access`, aprovação não interativa, ausência de sandbox automático, argumentos/stdin seguros e saída estruturada válida/inválida; Codex falso por padrão.
+- **Contratos/adaptador:** versões e flags de protocolo reais/incompatíveis, configuração nativa herdada sem override de sandbox, aprovação não interativa, argumentos/stdin seguros e saída estruturada válida/inválida; Codex falso por padrão.
 - **Persistência e concorrência:** migração v1→v2, backup, FKs, rollback, índice de tentativa ativa, três tentativas totais, idempotência por `operation_id`, parâmetros divergentes e disputa entre processos.
 - **Runtime e logs:** timeout padrão 1800 s/configuração, inatividade opcional, limite de 10 MiB por fluxo, drenagem, truncamento, retenção/limpeza explícita, falha de escrita, SIGTERM/SIGKILL Linux e Job Object Windows, pai encerrado e filhos órfãos.
 - **Recuperação/repetição:** interrupção em cada fronteira SQLite/spawn, PID reutilizado, tentativa `prepared`/`running`, processo possivelmente ativo, duas reaberturas, resultado desconhecido sem nova execução e decisão humana auditada antes de retentar.
@@ -177,7 +177,7 @@ Escopo autorizado: executor local Codex CLI para uma tarefa solicitada explicita
 
 Gate de homologação: uma única tarefa explícita pode ser executada pelo adaptador local Codex dentro da política aprovada, com estado e logs auditáveis, limites aplicados, cancelamento e recuperação determinística; conclusão depende de validação independente; testes de contrato e CI passam em Python 3.11, 3.12 e 3.13. A Fase 3 foi publicada e integrada após a homologação; nenhum agente real foi executado.
 
-Decisões consolidadas: timeout padrão 1800 s (máximo configurável 7200 s), três tentativas totais, sem repetição automática, logs incrementais limitados e retenção de 30 dias, identidade de processo além de PID, cancelamento de árvore por plataforma, sandbox e aprovações somente conforme configuração explícita/efetiva do usuário. Docker não é o sandbox do Codex.
+Decisões consolidadas: timeout padrão 1800 s (máximo configurável 7200 s), três tentativas totais, sem repetição automática, logs incrementais limitados e retenção de 30 dias, identidade de processo além de PID e cancelamento de árvore por plataforma. O sandbox do Codex pertence à configuração nativa do Codex; AgentFlow não o configura, seleciona ou substitui. Aprovação não interativa é controlada separadamente. Docker não é o sandbox do Codex.
 
 Riscos residuais: Codex CLI/flags e introspecção de configuração podem evoluir; limites rígidos de CPU/memória variam por sistema; matar processo não reverte arquivos; SQLite e spawn não são atômicos; logs podem conter segredos emitidos pelo agente; no Linux, processos podem sobreviver à morte do pai. A implementação deve falhar de modo seguro quando uma capacidade exigida não puder ser verificada. Git branches/checkpoints, Docker, múltiplos adaptadores e execução autônoma de fila permanecem fora da Fase 3.
 
@@ -497,6 +497,62 @@ Este roadmap não autoriza implementação de F7, F8 ou F9. Cada fase exige revi
 | F7 | Matriz de versões | Suíte, migração, pacote e CLI passam em Windows/Linux com Python 3.11, 3.12 e 3.13; falha em qualquer combinação bloqueia homologação. |
 | F7 | Capacidade e limites de provider | Fixtures separam capability anunciada/observada/enforced; unknown não satisfaz policy; hard cap sem worst-case controlado bloqueia execução; estimates permanecem não vinculantes. |
 
+## Trilha transversal MVP-20/MVP-21 — Intelligent Failure Recovery
+
+Esta trilha é um adendo ao roadmap, não renumera fases homologadas nem declara dispatch pronto. A decisão está em [ADR 0009 — IFR](decisions/0009-intelligent-failure-recovery.md). A base IFR é pré-requisito de recuperação para a execução operacional; AQA completo fica condicionado à homologação de execução real.
+
+| Marco | Entrega | Critério de saída |
+| --- | --- | --- |
+| MVP-20-IFR-01 | Contratos versionados para resultado de qualidade (`PASS`/`FAIL`/`INCONCLUSIVE`), estados de execução/autorização separados, incidente, tentativa, diagnóstico, estratégia, decisão IFR e intervenção humana. | Decodificação estrita; estado de qualidade não altera estado de processo/grant; agente não pode autorizar; compatibilidade de snapshots legados definida sem reinterpretar histórico. |
+| MVP-20-IFR-02 | Integração com controlador grant-scoped, `CodexAdapter`/`LocalRuntime`, State Store e journal append-only. | Cada tentativa registra operation ID, estratégia, ações, diff/checkpoint/evidência, falha, hipótese, diagnóstico e limites; workspace, grant, digest, validade e revogação validados antes do efeito. |
+| MVP-21-IFR-03 | Policy de diagnóstico e retry, assinatura normalizada com contexto, detecção de equivalência/loop e budgets configuráveis. | Três tentativas totais iniciais por incidente (incluindo a primeira), limites configuráveis de equivalência/duração/orçamento; encerramento antecipado se inútil/inseguro; determinística não repete cegamente. |
+| MVP-21-IFR-04 | Reconciliação, escalonamento humano e retomada persistente. | `unknown` nunca é repetido sem prova de ausência de efeito ou reconciliação segura; intervenção autenticada ligada à tarefa e escopo não expande; restart/replay/concurrency idempotentes. |
+| MVP-21-IFR-05 | Homologação IFR sintética e, somente sob autorização específica, operacional em workspace temporário. | Todos os dez cenários da ADR 0009 passam; recuperação e limites comprovados; real executor distinguido de mocks; dispatch continua fechado fora do grant. |
+| AQA-IFR-06 (posterior) | Avaliação adversarial independente, Critic orientado por evidência e Quality Gates. | Só inicia após homologação da execução real; avaliador independente, evidência vinculada ao snapshot exato; `FAIL`/`INCONCLUSIVE`/`not_run` bloqueiam integração/conclusão; AQA não emite permissões. |
+
+**Checkpoint MVP-20.1:** contratos de qualidade/diagnóstico e policy pura implementados em `agentflow.apl.failure_recovery`; controlador contínuo ligado ao journal SQLite existente; `operation_id` estável, `attempt_id` por tentativa, binding imutável dos limites IFR, retry restrito a efeito comprovadamente seguro e estratégia coberta pelo grant, detecção contextual de repetição e resumo de escalonamento persistido. Testes Windows: 47 focados e 622 na suíte (1 skip POSIX). A fatia está funcionalmente implementada, mas não homologa execução real; resposta autenticada à intervenção, reconciliação operacional de efeitos e retomada pós-intervenção seguem pendentes. Os estados PASS/FAIL/INCONCLUSIVE foram exercitados com validadores sintéticos. Ver [relatório MVP-20](mvp-20-controlled-codex-execution.md).
+
+### Adendo obrigatório — grant operacional e quotas
+
+Este adendo refina os critérios de saída MVP-20/MVP-21; não libera dispatch. Um contrato operacional persistido deve cobrir todas as tarefas previstas em um plano imutável específico (digest e revisão), workspace canônico e sua identidade, executor/versão, operações, limites e validade. Uma solicitação explícita inicia o contrato sem senha nem confirmação por tarefa; não é uma autorização ilimitada de sessão. Qualquer mudança material em plano, workspace, executor, operações ou limites exige novo contrato. Iniciadores agent/service requerem allowlist/configuração prévia. Revisão do plano e início de execução são ações distintas.
+
+Antes de qualquer piloto, implementar um ledger transacional no State Store/journal existente, sem banco paralelo. Em uma transação serializada e protegida contra concorrência entre processos, revalidar estado/expiração/revogação e binding do contrato, reservar a tarefa e suas quotas antes de iniciar efeito; persistir separadamente valores **reservados**, **consumidos** e **liberados**. Liberação só é permitida com evidência confiável de ausência de efeitos. Oversubscription deve ser impossível entre workers/processos. O último ponto controlado antes de criar o processo executor deve verificar a autorização e consumir/reservar atomicamente a permissão; uma checagem seguida de uma janela independente até o despacho não satisfaz este gate.
+
+Expiração da proposta de consentimento, expiração do grant e estado histórico da decisão são dimensões distintas. Retomada, recuperação ou reinício não renova prazo. Revogação impede novas reservas imediatamente e solicita cancelamento das tarefas ativas; o cancelamento pode não ser instantâneo e não reverte efeitos já produzidos. Processos órfãos e resultados ambíguos devem permanecer `unknown`/bloqueados até reconciliação segura, sem duplicar efeitos.
+
+IFR pode escolher retry somente dentro do contrato vigente: retries não ampliam escopo, não alteram plano, não renovam contrato e consomem quotas/limites da mesma autorização. Falhas `unknown` não liberam quotas nem repetem operação sem prova/reconciliação. Registrar custo estimado, observado e qualquer teto efetivamente imposto em campos separados. Estimativas não são teto financeiro; não declarar hard cap sem enforcement comprovado pelo provider.
+
+`cwd`/diretório de trabalho identifica contexto, mas não é fronteira suficiente de isolamento do filesystem. Registrar controles de isolamento por plataforma como `PASS`, `FAIL`, `INCONCLUSIVE` ou `BLOCKED`, com evidência concreta e justificativa; não inferir isolamento de uma configuração de processo.
+
+Antes de atualizar allowlist, verificar Codex CLI 0.167.2 por testes comportamentais, versão/argumentos observados e evidências de timeout, cancelamento, captura e saída. Não usar override do gate. O piloto futuro terá pelo menos duas tarefas dependentes em workspace temporário descartável (por exemplo, criar arquivo sintético e depois validá-lo), com limites e plano/digest apresentados ao operador. Não iniciar dispatch global nem executar essas tarefas antes de aprovação autenticada específica desse plano.
+
+| Gate MVP-20.2+ | Estado atual | Critério de saída e evidência exigida |
+| --- | --- | --- |
+| Contrato de execução local completo | **PENDENTE DE IMPLEMENTAÇÃO** | Contrato persistido vinculado a digest/revisão, workspace, executor/versão, operações, quotas e validade; resolução, revogação e journal. Início explícito não exige senha nem consentimento por tarefa. |
+| Reserva/consumo de duração e tentativas | **PASS — sintético** | SQLite `BEGIN IMMEDIATE` reserva tarefa/tentativa/segundos, consome duração medida, libera saldo após retorno ou prova no-effect, retém saldo para `unknown`; concorrência de reserva exercitada. Sem atomicidade com processo externo. |
+| Custo estimado/observado | **BLOCKED** | `ExecutionOutcome.cost` fica como estimativa não verificada; uso/custo observado e teto financeiro do provider não disponíveis. Sem hard cap. |
+| Último ponto controlado antes do spawn | **PASS — sintético / INCONCLUSIVE operacional** | Callback APL no `LocalRuntime` revalida binding/intenção imediatamente antes de `Popen`; teste de negativa impede a criação simulada. A transação SQLite não é atômica com criação externa. |
+| Recuperação/revogação | **PASS — sintético / INCONCLUSIVE operacional** | Revogação/unavailability persiste cancelamento e token cancela cooperativamente; unknown retém reserva e não repete. Falta teste com processo Codex real e fluxo de reconciliação/liberação. |
+| IFR sob grant | **PASS — sintético** | Estratégia autorizada é revalidada, retry exige no-effect/reconciled-safe e consome duração; unknown fica bloqueado. Nenhum grant operacional real foi emitido. |
+| Compatibilidade Codex 0.167.2 | **INCONCLUSIVE** | `--version` e ajudas confirmam flags documentadas; não houve prompt/inferência, logo parsing real, JSONL, timeout e cancelamento em execução permanecem não testados. Allowlist não alterada. |
+| Isolamento de filesystem | **BLOCKED** | `cwd` não conta como isolamento. Exigir prova por controle OS homologado ou declarar explicitamente o limite do perfil local; nenhum resultado de um SO extrapola ao outro. |
+| Piloto dependente (duas tarefas) | **BLOCKED** | Workspace em `%TEMP%` e manifesto com tarefas dependentes preparados; falta contrato local, integração operacional e prova de limites/recuperação. Execução requer evidência de persistência, cancelamento e ausência de tarefas fora do plano. |
+
+Cada registro de gate deve conter um dos estados `PASS`, `FAIL`, `INCONCLUSIVE` ou `BLOCKED`, evidências reproduzíveis e justificativa. `PASS` de testes sintéticos não equivale a `PASS` operacional. Uma decisão histórica concluída deve continuar consultável após expiração, mas não autoriza nova aprovação ou uso de grant expirado/revogado.
+
+### Sequência IFR de diagnóstico
+
+1. Registrar outcome de execução e resultado de qualidade em campos/eixos separados.
+2. Diagnosticar natureza (`quality_failure`, `deterministic`, `transient`, `environment`, `evaluation_inconclusive`, `operational_unknown`, `security_or_authorization_block`) e recuperabilidade (`potentially_recoverable`/`not_recoverable`).
+3. Conferir efeitos/estado anterior; se `unknown`, parar e reconciliar. Sem prova suficiente, escalar.
+4. Avaliar necessidade, utilidade, autorização e segurança do retry; computar assinatura contextualizada e limites restantes.
+5. Persistir estratégia e justificativa antes da execução. Repetição equivalente sem progresso, limite ou alteração de grant/escopo bloqueia.
+6. Executar apenas dentro da autorização atual; validar, persistir evidência/checkpoint e atualizar o incidente. Escalonamento mantém resumo, alternativas e resposta autenticada ligadas à tarefa.
+
+### Testes de aceite IFR
+
+Além dos testes listados em ADR 0009, executar crash entre cada transição persistente e spawn/resultado, restart, corrupção/inconsistência, concorrência, revogação/expiração, retry equivalente com e sem progresso, respostas humanas duplicadas/stale e proposta de estratégia que tente exceder escopo. Regressões para fases anteriores são obrigatórias.
+
 | SDD/F7 | Propor, comparar e aceitar revisão de spec/plano; falha de persistência durante aceite | Snapshot/digest e eventos são atômicos; revisão aceita é append-only; falha não ativa a proposta parcialmente. |
 | SDD/F7 | Abrir TOML legado sem `satisfies`, adicionar referência inválida ou critério sem cobertura | Legado carrega como `legacy_unmapped`; referência inválida falha; plano estrito não é aceito sem cobertura ou deferred rationale auditável. |
 | SDD/F7 | Alterar requisito, critério, tarefa ou dependência e calcular impacto transitivo | Mesmo input/revisões gera ChangeImpact idêntico; dependentes e artefatos afetados aparecem sem apagar histórico. |
@@ -505,3 +561,9 @@ Este roadmap não autoriza implementação de F7, F8 ou F9. Cada fase exige revi
 | SDD/F7–F8 | Criar routing decision ou WorkerAssignment a partir de revisão não aceita ou stale | Operação é recusada; assignment persistido contém os IDs exatos de revisão/plano/requisitos. |
 | SDD/F8–F9 | Propagar requisito até tentativa, worker, workspace, checkpoint, gate e resultado | Consulta de rastreabilidade reconstrói a cadeia por IDs/digests e identifica elo ausente sem inferir por texto. |
 | SDD/F9 | Propor alteração de spec/tasks em decomposição ou integração | Proposta não altera definição ativa; requer ChangeImpact, replanejamento e aceite antes de nova execução. |
+
+### ADR 0010 — início local sem senha para jobs comuns
+
+O proprietário decidiu que `LOCAL_SUPERVISED` não exige cadastro de senha, autenticação local adicional ou consentimento por tarefa para iniciar jobs. Uma chamada explícita do operador autoriza o plano inteiro por meio de contrato persistido. Agentes/serviços só iniciam contratos de trabalhos previamente configurados. O vínculo imutável ao plano, workspace, executor, operações, quotas/validade, revogação, cancelamento, journal e recuperação conservadora continuam obrigatórios. Esta decisão não remove nem altera `INDEPENDENT_AUTHORITY`, H-01–H-10 ou os controles da ADR 0008 independente.
+
+**Estado de implementação:** decisão registrada em [ADR 0010](decisions/0010-passwordless-local-job-execution.md). O controlador e o IFR existentes ainda são grant-resolver scoped; a API de contrato local, sua CLI e sua homologação são pendências concretas desta fatia. `authorize-plan` e `local-auth` ainda existem para compatibilidade, mas não devem ser tratados como caminho requerido para jobs comuns. Dispatch não foi iniciado nesta refatoração.

@@ -49,8 +49,6 @@ class OpenCodeAdapter:
         if (selection is None or selection.mode != "manual" or selection.agent_id != self.adapter_id
                 or not _ID.fullmatch(selection.provider_id) or not _ID.fullmatch(selection.model_id)):
             raise ExecutionError("OpenCode exige seleção manual de provider/modelo válido")
-        if request.policy.sandbox is not None:
-            raise ExecutionError("OpenCode não atesta enforcement de sandbox para este runtime")
         if not request.workspace.is_dir() or not (request.workspace / ".git").exists():
             raise ExecutionError("workspace Git inválido")
         version_output = self._probe("--pure", "--version")
@@ -75,7 +73,7 @@ class OpenCodeAdapter:
             version, "unknown", "unknown",
             ("headless-run", "jsonl-output", "manual-model", "external-plugins-disabled-for-run",
              "configured-model-inventory-checked",
-             "sandbox-enforcement-unknown", "network-enforcement-unknown",
+             "native-sandbox-config-unmodified", "network-enforcement-unknown",
              "effective-model-requires-result-attestation"), self.api_version,
             selection.provider_id, selection.model_id)
 

@@ -185,3 +185,7 @@ Relatórios devem classificar cada controle como `configured`, `observed`, `enfo
 Esta ADR aprova a direção local autossuficiente e o perfil `LOCAL_SUPERVISED` como caminho principal do MVP, preservando `INDEPENDENT_AUTHORITY` e H-01–H-10 como trilha de alta garantia separada. A fundação de seleção e contratos preparatórios pode ser implementada. **O perfil local ainda não está homologado e nenhum dispatch real foi habilitado.** Antes de implementar autoridade positiva ou executar jobs, ainda são necessários os contratos detalhados, os gates por OS e autorização operacional específica.
 
 Classificação da direção: **`LOCAL_ARCHITECTURE_APPROVED_FOR_DEVELOPMENT`**. Estado de homologação permanece pendente.
+
+## Supersessão parcial pela ADR 0010
+
+Em 2026-11-13, o proprietário decidiu pela ADR 0010 que o início de jobs comuns `LOCAL_SUPERVISED` não exige senha/autenticação adicional nem consentimento por tarefa. As passagens deste documento que exigem consentimento humano autenticado como condição universal para execução local estão supersedidas somente nesse ponto. O contrato local persistido, escopo estrito, limites, expiração, revogação, recuperação conservadora e confiança no host continuam necessários. `INDEPENDENT_AUTHORITY`, a arquitetura independente da ADR 0008 R2 e H-01–H-10 não são afetados. Esta nota não declara o contrato ou dispatch implementados/homologados.

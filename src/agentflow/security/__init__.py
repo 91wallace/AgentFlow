@@ -3,10 +3,12 @@
 from .profile import (
     ConsentDecision,
     ConsentLimits,
+    ExecutionPlanConsentBinding,
     LocalConsentCheck,
     LocalConsentInterface,
     LocalConsentReceipt,
     LocalConsentRequest,
+    LocalExecutionConsentRequest,
     ProfileConfiguration,
     ProfileConfigurationError,
     ProfileDiagnostic,
@@ -78,6 +80,9 @@ from .local_consent_review import (
     LocalConsentConfigurationError,
     LocalConsentRuntimeConfiguration,
     load_local_consent_configuration,
+    make_execution_binding_resolver,
+    prepare_execution_plan_consent_request,
+    review_accepted_execution_plan,
     review_persisted_handoff,
 )
 from .windows_webauthn import (
@@ -91,8 +96,9 @@ from .windows_webauthn import (
 )
 
 __all__ = [
-    "ConsentDecision", "ConsentLimits", "LocalConsentCheck",
-    "LocalConsentInterface", "LocalConsentReceipt", "LocalConsentRequest", "ProfileConfiguration",
+    "ConsentDecision", "ConsentLimits", "ExecutionPlanConsentBinding", "LocalConsentCheck",
+    "LocalConsentInterface", "LocalConsentReceipt", "LocalConsentRequest",
+    "LocalExecutionConsentRequest", "ProfileConfiguration",
     "ProfileConfigurationError", "ProfileDiagnostic", "SecurityProfile",
     "UnavailableLocalConsent", "inspect_consent_receipt", "load_profile_configuration",
     "profile_diagnostic", "save_profile_configuration",
@@ -117,7 +123,9 @@ __all__ = [
     "current_local_operator_principal", "enroll_local_operator_interactive",
     "revoke_local_operator_interactive",
     "LocalConsentConfigurationError", "LocalConsentRuntimeConfiguration",
-    "load_local_consent_configuration", "review_persisted_handoff",
+    "load_local_consent_configuration", "make_execution_binding_resolver",
+    "prepare_execution_plan_consent_request", "review_accepted_execution_plan",
+    "review_persisted_handoff",
     "LocalWebAuthnAssertionProof", "WindowsHelloCredentialEnrollment",
     "WindowsWebAuthnApi", "WindowsWebAuthnError",
     "WindowsWebAuthnOperatorAuthenticator", "WindowsWebAuthnProofProvider",

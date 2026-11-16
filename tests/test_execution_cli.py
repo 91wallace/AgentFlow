@@ -5,6 +5,8 @@ import sys
 from threading import Event, Thread
 import time
 
+import pytest
+
 from agentflow.agents import AgentResult, ProcessIdentity, ProcessResult, ProcessSpec
 from agentflow.agents import ExecutionPolicy, ExecutionRequest
 from agentflow import cli as cli_module
@@ -20,7 +22,7 @@ class FakeAdapter:
         pass
     def prepare(self, request):
         return ProcessSpec(Path(sys.executable), (), request.workspace, request.instruction, (),
-                          "fake", "test", request.policy.sandbox, request.policy.approval)
+                          "fake", "test", "unknown", request.policy.approval)
     def interpret(self, result):
         return AgentResult("process_succeeded", "completed")
 
@@ -81,13 +83,21 @@ def test_execute_cli_is_explicit_and_idempotent(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli_module, "CodexAdapter", FakeAdapter)
     monkeypatch.setattr("agentflow.cli.LocalRuntime", FakeRuntime)
     command = ["execute", "--path", str(root), "--task", "first", "--operation-id", "run-1",
-               "--sandbox", "workspace-write", "--approval", "never"]
+               "--approval", "never"]
     assert main(command) == 0
     assert main(command) == 0
     assert FakeRuntime.runs == 1
     with ExecutionStore(root / ".agentflow" / "state.sqlite3") as store:
         assert store.attempt(store.db.execute("SELECT attempt_id FROM execution_attempts").fetchone()[0]).status == "process_succeeded"
     assert "nenhum processo reiniciado" in capsys.readouterr().out
+
+
+def test_execute_cli_has_no_sandbox_override_option(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["execute", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--sandbox" not in help_text
 
 
 def test_cancel_cli_signals_active_attempt(tmp_path, monkeypatch, capsys):
@@ -97,7 +107,7 @@ def test_cancel_cli_signals_active_attempt(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("agentflow.cli.LocalRuntime", WaitingRuntime)
     base = ["--path", str(root)]
     runner = Thread(target=main, args=( ["execute", *base, "--task", "first", "--operation-id", "run-cancel",
-                                        "--sandbox", "workspace-write", "--approval", "never"], ))
+                                        "--approval", "never"], ))
     runner.start()
     assert WaitingRuntime.started.wait(5)
     with ExecutionStore(root / ".agentflow" / "state.sqlite3") as store:
@@ -115,7 +125,7 @@ def test_recover_cli_reports_ambiguous_prepared_attempt(tmp_path, capsys):
     with ExecutionStore(control / "state.sqlite3") as store:
         definition = store.db.execute("SELECT definition_digest FROM task_definitions WHERE task_id='first'").fetchone()[0]
         request = ExecutionRequest("sample", "first", 1, definition, "prepared-run", root, "work",
-                                   ExecutionPolicy(sandbox="workspace-write", approval="never"))
+                                   ExecutionPolicy(approval="never"))
         attempt = store.prepare(request, FakeAdapter().prepare(request), "owner")
     assert main(["recover", "--path", str(root)]) == 0
     assert attempt.attempt_id in capsys.readouterr().out
@@ -128,7 +138,7 @@ def test_post_spawn_os_error_is_recorded_as_unknown(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli_module, "CodexAdapter", FakeAdapter)
     monkeypatch.setattr(cli_module, "LocalRuntime", UncertainRuntime)
     assert main(["execute", "--path", str(root), "--task", "first", "--operation-id", "uncertain",
-                 "--sandbox", "workspace-write", "--approval", "never"]) == 1
+                 "--approval", "never"]) == 1
     with ExecutionStore(root / ".agentflow" / "state.sqlite3") as store:
         attempt_id = store.db.execute("SELECT attempt_id FROM execution_attempts").fetchone()[0]
         assert store.attempt(attempt_id).status == "interrupted"

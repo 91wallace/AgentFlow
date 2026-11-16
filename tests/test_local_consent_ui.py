@@ -78,6 +78,55 @@ def test_invalid_decision_or_missing_authoritative_objective_fails_closed():
         format_consent_request(request(), objective="", account_label="local")
 
 
+def test_missing_or_failing_authoritative_resolver_fails_before_prompt():
+    output = StringIO()
+    terminal = TerminalConsentReview(
+        input_stream=StringIO("approve\n"), output_stream=output,
+        authoritative_context_resolver=lambda _request: None,
+        account_label="local-account", clock=lambda: NOW)
+    with pytest.raises(ValueError, match="authoritative_consent_context_unavailable"):
+        terminal.request_consent(request())
+    assert output.getvalue() == ""
+
+    terminal = TerminalConsentReview(
+        input_stream=StringIO("approve\n"), output_stream=StringIO(),
+        objective_resolver=None, authoritative_context_resolver=lambda _request: None,
+        account_label="local-account", clock=lambda: NOW)
+    with pytest.raises(ValueError, match="authoritative_consent_context_unavailable"):
+        terminal.request_consent(request())
+
+    terminal = TerminalConsentReview(
+        input_stream=StringIO("approve\n"), output_stream=StringIO(),
+        objective_resolver=lambda _request: None,
+        account_label="local-account", clock=lambda: NOW)
+    with pytest.raises(ValueError, match="authoritative_objective_required"):
+        terminal.request_consent(request())
+
+
+def test_invalid_authoritative_context_resolver_is_rejected_at_construction():
+    with pytest.raises(ValueError, match="authoritative_context_resolver_invalid"):
+        TerminalConsentReview(
+            input_stream=StringIO("approve\n"), output_stream=StringIO(),
+            objective_resolver=lambda _request: "objective",
+            authoritative_context_resolver=object())
+
+
+def test_authoritative_context_missing_required_presentation_data_fails_closed():
+    from types import SimpleNamespace
+
+    consent_request = request()
+    context = SimpleNamespace(
+        request=consent_request, approvable_for_review=True,
+        authorized_scope=("workspace",), task_summaries=(),
+        broker_status="pending", workspace_path="C:/workspace")
+    terminal = TerminalConsentReview(
+        input_stream=StringIO("approve\n"), output_stream=StringIO(),
+        authoritative_context_resolver=lambda _request: context,
+        account_label="local-account", clock=lambda: NOW)
+    with pytest.raises(ValueError, match="authoritative_consent_context_invalid"):
+        terminal.request_consent(consent_request)
+
+
 def test_terminal_render_escapes_controls_and_bounds_untrusted_text():
     rendered = format_consent_request(
         request(), objective="goal\x1b[31m\r\nFAKE APPROVED", account_label="operator\x1b[2J",

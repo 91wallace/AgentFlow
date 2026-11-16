@@ -47,8 +47,6 @@ class ClaudeCodeAdapter:
         if (selection is None or selection.mode != "manual"
                 or selection.agent_id != self.adapter_id or selection.provider_id != "anthropic"):
             raise ExecutionError("Claude Code exige seleção manual de provider/modelo")
-        if request.policy.sandbox is not None:
-            raise ExecutionError("sandbox do Claude Code cobre apenas comandos shell; política genérica não comprovada")
         if request.policy.approval == "on-request":
             raise ExecutionError("aprovação interativa incompatível com Claude Code headless")
         if not request.workspace.is_dir() or not (request.workspace / ".git").exists():
@@ -78,7 +76,7 @@ class ClaudeCodeAdapter:
             self.executable, args, request.workspace.resolve(), request.instruction,
             (), self.adapter_id, version, "unknown", "no-interactive-prompts",
             ("headless", "stream-json", "manual-model", "model-reported-in-init",
-             "permission-prompts-denied", "sandbox-scope-shell-only",
+             "permission-prompts-denied", "native-sandbox-config-unmodified",
              "provider-anthropic-auth-confirmed"), self.api_version,
             "anthropic", selection.model_id)
 

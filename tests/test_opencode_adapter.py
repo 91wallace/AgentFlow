@@ -61,11 +61,12 @@ def test_prepare_uses_manual_provider_model_without_config_mutation(tmp_path):
     assert config.read_text(encoding="utf-8") == '{"model":"keep-existing"}'
 
 
-def test_prepare_blocks_unknown_model_and_requested_sandbox(tmp_path):
+def test_prepare_blocks_unknown_model_and_preserves_native_sandbox(tmp_path):
     with pytest.raises(ExecutionError, match="não confirmado"):
         adapter(tmp_path, runner(model="anthropic/another-model")).prepare(request(tmp_path))
-    with pytest.raises(ExecutionError, match="não atesta"):
-        adapter(tmp_path).prepare(request(tmp_path, policy=ExecutionPolicy(sandbox="workspace-write")))
+    spec = adapter(tmp_path).prepare(request(tmp_path))
+    assert "--sandbox" not in spec.arguments
+    assert spec.effective_sandbox == "unknown"
 
 
 def test_prepare_requires_observed_headless_capabilities(tmp_path):

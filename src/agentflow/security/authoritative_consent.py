@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -44,6 +44,9 @@ class AuthoritativeConsentProposal:
     expires_at: str
     request: LocalConsentRequest
     consent_window_open: bool = True
+    plan_revision_id: str = ""
+    plan_content_digest: str = ""
+    target_jobs: tuple = ()
 
     @property
     def approvable_for_review(self) -> bool:
@@ -443,6 +446,10 @@ class AuthoritativeConsentResolver:
                 operations=operations, task_summaries=summaries,
                 limits=self.limits, expires_at=request.expires_at, request=request,
                 consent_window_open=consent_window_open,
+                plan_revision_id=cycle.plan_revision_id, target_jobs=target_jobs,
+                plan_content_digest="sha256:" + hashlib.sha256(json.dumps(
+                    [asdict(job) for job in target_jobs], sort_keys=True,
+                    separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest(),
             )
         except AuthoritativeConsentError:
             raise

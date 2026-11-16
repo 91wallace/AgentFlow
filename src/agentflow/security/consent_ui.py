@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import getpass
+import hashlib
 from typing import Protocol, TextIO
 
 from .authorization import local_consent_challenge_digest
@@ -98,6 +99,23 @@ def format_consent_request(request: LocalConsentRequest, *, objective: str,
         f"Conta local apresentada pelo SO: {_terminal_text(account_label)} (rótulo não autenticado)",
         "Ação digitada não autentica identidade e, por si só, não aprova nem autoriza execução.",
     )
+    execution = getattr(request, "execution_binding", None)
+    if execution is not None:
+        lines += (
+            "AUTORIZAÇÃO DE EXECUÇÃO DO PLANO COMPLETO (uma decisão):",
+            f"  ciclo={_terminal_text(execution.cycle_id)}; revisão do plano={_terminal_text(execution.plan_revision_id)}",
+            f"  executor={_terminal_text(execution.executor_id)}@{_terminal_text(execution.executor_version)}",
+            f"  tentativas/job={execution.max_attempts_per_job}; duração máxima={execution.max_duration_seconds}s; concorrência={execution.max_concurrency}",
+            f"  política financeira={_terminal_text(execution.financial_budget_mode)}",
+            f"  caminho do workspace={_terminal_text(execution.workspace_path)}",
+            f"  identidade do workspace={_terminal_text(execution.workspace_identity_digest)}",
+            "  grafo e quotas por tarefa:",
+            *(f"    - {_terminal_text(job)} depende de [{_terminal_text(','.join(deps))}]; scope=[{_terminal_text(','.join(scope))}]"
+              for job, deps, scope in execution.task_graph),
+            *(f"    - {_terminal_text(job)}: tentativas={attempts}, duração={seconds}s, estimativa={cost} {limits.budget_currency}"
+              for job, attempts, seconds, cost in execution.task_limits_by_job),
+            "A aprovação cobre somente este binding assinado; mudança material exige nova aprovação.",
+        )
     rendered = "\n".join(lines) + "\n"
     if len(rendered.encode("utf-8")) > 64 * 1024:
         raise ConsentReviewError("consent_presentation_exceeds_size_limit")
@@ -126,21 +144,52 @@ class TerminalConsentReview:
         self._ttl = receipt_ttl_seconds
 
     def request_consent(self, request: LocalConsentRequest) -> LocalConsentReceipt | None:
-        context = (self._authoritative_context_resolver(request)
-                   if self._authoritative_context_resolver is not None else None)
+        context = None
+        if self._authoritative_context_resolver is not None:
+            try:
+                context = self._authoritative_context_resolver(request)
+            except ConsentReviewError:
+                raise
+            except Exception as exc:
+                raise ConsentReviewError("authoritative_consent_context_unavailable") from exc
+            if context is None:
+                raise ConsentReviewError("authoritative_consent_context_unavailable")
         if context is not None:
             if getattr(context, "request", None) != request:
                 raise ConsentReviewError("authoritative_request_binding_mismatch")
             if not getattr(context, "approvable_for_review", False):
-                self._output.write(f"Proposta não aprovável neste estado: {context.broker_status}.\n")
+                status = getattr(context, "broker_status", None)
+                if type(status) is not str or not status:
+                    raise ConsentReviewError("authoritative_consent_context_invalid")
+                self._output.write(f"Proposta não aprovável neste estado: {status}.\n")
                 raise ConsentReviewError("proposal_not_approvable_in_current_state")
-            objective = context.objective
-            scope = context.authorized_scope
-            summaries = context.task_summaries
-            persisted_status = context.broker_status
-            workspace_path = context.workspace_path
+            objective = getattr(context, "objective", None)
+            scope = getattr(context, "authorized_scope", None)
+            summaries = getattr(context, "task_summaries", None)
+            persisted_status = getattr(context, "broker_status", None)
+            workspace_path = getattr(context, "workspace_path", None)
+            if (type(objective) is not str or not objective.strip()
+                    or type(scope) is not tuple
+                    or any(type(item) is not str or not item for item in scope)
+                    or type(summaries) is not tuple
+                    or any(type(item) is not str or not item for item in summaries)
+                    or type(persisted_status) is not str or not persisted_status
+                    or type(workspace_path) is not str or not workspace_path):
+                raise ConsentReviewError("authoritative_consent_context_invalid")
+            execution = getattr(request, "execution_binding", None)
+            if (execution is not None
+                    and "sha256:" + hashlib.sha256(objective.encode("utf-8")).hexdigest()
+                    != execution.objective_digest):
+                raise ConsentReviewError("authoritative_objective_binding_mismatch")
         else:
-            objective = self._objective_resolver(request)
+            if not callable(self._objective_resolver):
+                raise ConsentReviewError("authoritative_objective_resolver_required")
+            try:
+                objective = self._objective_resolver(request)
+            except Exception as exc:
+                raise ConsentReviewError("authoritative_objective_unavailable") from exc
+            if type(objective) is not str or not objective.strip():
+                raise ConsentReviewError("authoritative_objective_required")
             scope, summaries, persisted_status = (), (), "pending (não revalidado)"
             workspace_path = None
         self._output.write(format_consent_request(

@@ -60,3 +60,5 @@ O objetivo de encadear automaticamente planejamento → execução → avaliaç�
 ## Parecer
 
 **PARTIAL** — o provider experimental foi implementado e testado por simulação; o fluxo real com Codex e o ciclo automático de jobs não foram homologados. Não declarar pronto para produção ou execução autônoma.
+
+**Nota de manutenção (2026-11-14):** a referência `--sandbox read-only` é histórica e não descreve a invocação atual. AgentFlow não passa `--sandbox` nem substitui configurações do Codex; o sandbox nativo é aplicado pelo próprio Codex CLI.

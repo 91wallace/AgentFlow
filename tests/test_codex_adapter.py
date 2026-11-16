@@ -11,7 +11,7 @@ from agentflow.agents import (AgentCapabilities, ExecutionError, ExecutionPolicy
 from agentflow.agents.codex import CodexAdapter
 
 
-HELP = "--sandbox read-only workspace-write danger-full-access --config --json --cd --strict-config --ask-for-approval never on-request"
+HELP = "--json --cd --strict-config --ask-for-approval never on-request"
 
 
 def adapter(tmp_path, monkeypatch, version="codex-cli 0.166.0", help_text=HELP):
@@ -31,25 +31,27 @@ def request(tmp_path, policy=None):
     return ExecutionRequest("p", "t", 1, "hash", "op", tmp_path, "Do work", policy or ExecutionPolicy())
 
 
-def test_inherited_settings_fail_before_spawn(tmp_path, monkeypatch):
+def test_native_sandbox_setting_is_inherited_without_agentflow_override(tmp_path, monkeypatch):
     subject = adapter(tmp_path, monkeypatch)
-    with pytest.raises(ExecutionError, match="não verificável"):
-        subject.prepare(request(tmp_path))
+    spec = subject.prepare(request(tmp_path, ExecutionPolicy(approval="never")))
+    assert "--sandbox" not in spec.arguments
+    assert spec.effective_sandbox == "unknown"
 
 
-def test_explicit_full_access_and_noninteractive_approval(tmp_path, monkeypatch):
+def test_codex_invocation_does_not_set_sandbox_and_keeps_noninteractive_approval(tmp_path, monkeypatch):
     subject = adapter(tmp_path, monkeypatch)
-    spec = subject.prepare(request(tmp_path, ExecutionPolicy(sandbox="danger-full-access", approval="never")))
-    assert "danger-full-access" in spec.arguments
+    spec = subject.prepare(request(tmp_path, ExecutionPolicy(approval="never")))
+    assert "--sandbox" not in spec.arguments
     assert "--ask-for-approval" in spec.arguments and "never" in spec.arguments
     assert spec.arguments[:3] == ("--ask-for-approval", "never", "exec")
     assert "--config" not in spec.arguments
     assert spec.cwd == request(tmp_path).workspace.resolve()
     assert spec.arguments[spec.arguments.index("-C") + 1] == str(spec.cwd)
+    assert ("AGENTFLOW_MANAGED_EXECUTION", "1") in spec.environment
 
 
-def test_trust_override_is_per_invocation_and_workspace_scoped(tmp_path, monkeypatch):
-    subject = CodexAdapter(Path(sys.executable), trust_workspace_for_invocation=True)
+def test_adapter_does_not_override_codex_project_or_sandbox_configuration(tmp_path, monkeypatch):
+    subject = CodexAdapter(Path(sys.executable))
     def fake_run(command, **kwargs):
         if "--version" in command:
             output = "codex-cli 0.166.0"
@@ -61,10 +63,9 @@ def test_trust_override_is_per_invocation_and_workspace_scoped(tmp_path, monkeyp
             output = HELP
         return subprocess.CompletedProcess(command, 0, output, "")
     monkeypatch.setattr(subprocess, "run", fake_run)
-    spec = subject.prepare(request(tmp_path, ExecutionPolicy(sandbox="read-only", approval="never")))
-    config = spec.arguments[spec.arguments.index("--config") + 1]
-    assert config == f'projects."{spec.cwd.as_posix()}".trust_level="trusted"'
-    assert spec.arguments.index("--config") < spec.arguments.index("exec")
+    spec = subject.prepare(request(tmp_path, ExecutionPolicy(approval="never")))
+    assert "--config" not in spec.arguments
+    assert "--sandbox" not in spec.arguments
 
 
 def test_unknown_version_or_capability_fails_before_spawn(tmp_path, monkeypatch):
@@ -76,19 +77,13 @@ def test_unknown_version_or_capability_fails_before_spawn(tmp_path, monkeypatch)
         subject.prepare(request(tmp_path))
 
 
-def test_partial_policy_is_unverifiable(tmp_path, monkeypatch):
-    subject = adapter(tmp_path, monkeypatch)
-    with pytest.raises(ExecutionError, match="não verificável"):
-        subject.prepare(request(tmp_path, ExecutionPolicy(sandbox="read-only")))
-
-
 def test_codex_adapter_rejects_non_git_workspace(tmp_path, monkeypatch):
     subject = adapter(tmp_path, monkeypatch)
     invalid = tmp_path / "not-a-repository"
     invalid.mkdir()
     with pytest.raises(ExecutionError, match="workspace Git inválido"):
         subject.prepare(ExecutionRequest("p", "t", 1, "hash", "op", invalid, "Do work",
-                                         ExecutionPolicy(sandbox="read-only", approval="never")))
+                                         ExecutionPolicy(approval="never")))
 
 
 def test_codex_exposes_common_lifecycle_contract_without_claiming_session_recovery(
@@ -115,6 +110,14 @@ def test_codex_experimental_version_is_discovered_but_not_marked_homologated(
     availability = subject.discover()
     assert availability.status == "unknown"
     assert availability.reason_code == "version_not_homologated"
+
+
+def test_codex_0169_version_is_behaviorally_homologated(tmp_path, monkeypatch):
+    subject = adapter(tmp_path, monkeypatch, version="codex-cli 0.169.0")
+    availability = subject.discover()
+    assert availability.status == "available"
+    assert availability.version == "0.169.0"
+    assert availability.reason_code == "version_tested"
 
 
 def test_shared_state_normalization_preserves_ambiguous_outcomes():

@@ -56,8 +56,6 @@ class HermesAdapter:
                 or not _IDENTIFIER.fullmatch(selection.provider_id)
                 or not _IDENTIFIER.fullmatch(selection.model_id)):
             raise ExecutionError("Hermes exige seleção manual e explícita de provider/modelo")
-        if request.policy.sandbox is not None:
-            raise ExecutionError("Hermes não atesta enforcement do sandbox solicitado")
         if request.policy.approval is not None:
             raise ExecutionError("Hermes headless não comprova a política de aprovação solicitada")
         if not request.workspace.is_dir() or not (request.workspace / ".git").exists():
@@ -87,7 +85,7 @@ class HermesAdapter:
             self.adapter_id, version, "unknown", "unknown",
             ("headless-oneshot", "query-file-stdin", "stream-json", "manual-provider-model",
              "file-toolset-only-requested", "safe-mode-requested", "rules-memory-skills-disabled-requested",
-             "effective-provider-unreported-by-protocol", "sandbox-enforcement-unknown",
+             "effective-provider-unreported-by-protocol", "native-sandbox-config-unmodified",
              "network-enforcement-unknown"),
             self.api_version, selection.provider_id, selection.model_id)
 

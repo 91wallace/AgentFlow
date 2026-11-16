@@ -9,7 +9,7 @@ from agentflow.agents import (AntigravityAdapter, ExecutionError, ExecutionPolic
 
 
 MODEL = "gemini-3.8-flash-medium"
-HELP = "--input-format --output-format --model --print-timeout --sandbox --dangerously-skip-permissions"
+HELP = "--input-format --output-format --model --print-timeout --dangerously-skip-permissions"
 
 
 def make_request(tmp_path, *, policy=None, model=MODEL):
@@ -64,7 +64,7 @@ def test_prepare_uses_documented_headless_protocol_and_manual_model_without_over
     assert "--sandbox" not in spec.arguments
     assert "--dangerously-skip-permissions" not in spec.arguments
     assert spec.effective_sandbox == "unknown"
-    assert "sandbox-enforcement-unknown" in spec.capabilities
+    assert "native-sandbox-config-unmodified" in spec.capabilities
 
 
 @pytest.mark.parametrize("runner", [
@@ -84,8 +84,9 @@ def test_implicit_model_or_unmappable_policy_is_rejected(tmp_path):
         subject.prepare(ExecutionRequest(request.project_id, request.task_id,
             request.definition_revision, request.definition_digest, request.operation_id,
             request.workspace, request.instruction, request.policy))
-    with pytest.raises(ExecutionError, match="não mapeável"):
-        subject.prepare(make_request(tmp_path, policy=ExecutionPolicy(sandbox="workspace-write")))
+    spec = subject.prepare(make_request(tmp_path))
+    assert "--sandbox" not in spec.arguments
+    assert spec.effective_sandbox == "unknown"
 
 
 def test_interpret_requires_structured_success_and_matching_effective_model(tmp_path):

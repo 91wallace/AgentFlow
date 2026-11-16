@@ -56,6 +56,25 @@ def test_spawn_failure_does_not_call_started(tmp_path, monkeypatch):
     assert not called
 
 
+def test_before_spawn_gate_denial_prevents_process_creation(tmp_path, monkeypatch):
+    calls = []
+    started = []
+    monkeypatch.setattr(local_module.subprocess, "Popen",
+                        lambda *args, **kwargs: calls.append("popen"))
+
+    def deny():
+        calls.append("authorization")
+        raise RuntimeError("authorization revoked")
+
+    with pytest.raises(RuntimeError, match="authorization revoked"):
+        LocalRuntime(tmp_path / "logs").run(
+            spec(tmp_path, "print('must not run')"), "denied",
+            ExecutionPolicy(timeout_seconds=5), started.append, Event(),
+            before_spawn=deny)
+    assert calls == ["authorization"]
+    assert started == []
+
+
 def test_logs_redact_secrets_and_write_atomic_metadata(tmp_path):
     fake_key = "sk-" + "abcdefghijklmnop"
     result = LocalRuntime(tmp_path / "logs").run(

@@ -42,3 +42,5 @@ O primeiro processo anterior também revelou a posição incorreta de `--ask-for
 - Esta é homologação funcional local do planejador, não homologação de segurança do Codex CLI. O processo ainda roda com permissões do usuário; `read-only` e trust scoped não demonstram confinamento.
 - A proposta é sintética e segue sem aceite. A execução de jobs pelo APL continua desabilitada; a integração com executor permanece bloqueada pelas decisões de Fase 7/Broker/TEG. Não executar jobs reais nesta etapa.
 - A proposta é mantida no SQLite descartável para inspeção e não altera `.agentflow/tasks.toml` do repositório principal.
+
+**Nota arquitetural (2026-11-14):** o trust override por `--config` documentado acima foi removido do adapter. Hoje AgentFlow não injeta configuração de sandbox nem override de confiança; a confiança e o sandbox são determinados pela configuração e pelos mecanismos nativos do Codex.

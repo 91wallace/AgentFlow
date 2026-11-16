@@ -59,13 +59,14 @@ def test_prepare_uses_manual_model_noninteractive_and_does_not_write_user_config
     assert spec.stdin == "Do exactly this task"
 
 
-def test_prepare_rejects_unverified_version_auth_and_generic_sandbox(tmp_path):
+def test_prepare_rejects_unverified_version_auth_and_preserves_native_sandbox(tmp_path):
     with pytest.raises(ExecutionError, match="anterior"):
         adapter(tmp_path, fake_runner(version="2.1.100")).prepare(request(tmp_path))
     with pytest.raises(ExecutionError, match="não confirmado"):
         adapter(tmp_path, fake_runner(auth_method="third_party")).prepare(request(tmp_path))
-    with pytest.raises(ExecutionError, match="apenas comandos shell"):
-        adapter(tmp_path).prepare(request(tmp_path, policy=ExecutionPolicy(sandbox="workspace-write")))
+    spec = adapter(tmp_path).prepare(request(tmp_path))
+    assert "native-sandbox-config-unmodified" in spec.capabilities
+    assert spec.effective_sandbox == "unknown"
     with pytest.raises(ExecutionError, match="incompatível"):
         adapter(tmp_path).prepare(request(tmp_path, policy=ExecutionPolicy(approval="on-request")))
 

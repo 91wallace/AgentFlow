@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 import re
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .selection import ModelSelectionRequest, ModelSelectionObservation
 
@@ -16,10 +16,15 @@ class ExecutionError(ValueError):
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
+    """AgentFlow-owned process controls, excluding agent-native sandbox modes.
+
+    A CLI adapter must inherit the executor's own sandbox configuration. This
+    policy deliberately cannot request or select such a mode.
+    """
+
     timeout_seconds: int = 1800
     idle_seconds: int | None = None
     log_limit_bytes: int = 10 * 1024 * 1024
-    sandbox: str | None = None
     approval: str | None = None
 
     def __post_init__(self) -> None:
@@ -30,8 +35,6 @@ class ExecutionPolicy:
             raise ExecutionError("timeout de inatividade inválido")
         if type(self.log_limit_bytes) is not int or not 1 <= self.log_limit_bytes <= 50 * 1024 * 1024:
             raise ExecutionError("limite de log inválido")
-        if self.sandbox is not None and self.sandbox not in ("read-only", "workspace-write", "danger-full-access"):
-            raise ExecutionError("sandbox inválido")
         if self.approval is not None and self.approval not in ("never", "on-request"):
             raise ExecutionError("política de aprovação inválida")
 
@@ -53,6 +56,13 @@ class ExecutionRequest:
 
 @dataclass(frozen=True)
 class ProcessSpec:
+    """Concrete process request; native sandbox observation is audit-only.
+
+    ``effective_sandbox`` is a legacy persistence field and must remain
+    ``"unknown"`` unless the native executor can attest its actual setting.
+    It is never a configuration input.
+    """
+
     executable: Path
     arguments: tuple[str, ...]
     cwd: Path
@@ -215,7 +225,8 @@ class LifecycleAgentAdapter(AgentAdapter, Protocol):
 
 class ProcessRuntime(Protocol):
     def run(self, spec: ProcessSpec, attempt_id: str, policy: ExecutionPolicy,
-            on_started: "StartedCallback", cancel: "Cancellation") -> ProcessResult: ...
+            on_started: "StartedCallback", cancel: "Cancellation",
+            before_spawn: "Callable[[], None] | None" = None) -> ProcessResult: ...
 
 
 class StartedCallback(Protocol):

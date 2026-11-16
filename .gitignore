@@ -8,3 +8,4 @@ build/
 .agentflow/*
 !.agentflow/spec.toml
 !.agentflow/tasks.toml
+.agents/skills/agentflow/agentflow-runtime.json

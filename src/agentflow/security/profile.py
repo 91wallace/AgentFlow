@@ -13,6 +13,7 @@ from enum import Enum
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -234,6 +235,164 @@ class LocalConsentRequest:
             "operator_identity": self.operator_identity,
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class ExecutionPlanConsentBinding:
+    """Exact plan/executor binding displayed and authenticated for one-run consent."""
+
+    cycle_id: str
+    plan_revision_id: str
+    plan_content_digest: str
+    objective_digest: str
+    workspace_path: str
+    workspace_identity_digest: str
+    authorized_scope: tuple[str, ...]
+    task_graph: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]
+    executor_id: str
+    executor_version: str
+    max_attempts_per_job: int
+    max_duration_seconds: float
+    max_concurrency: int
+    financial_budget_mode: str
+    strategies_by_job: tuple[tuple[str, tuple[str, ...]], ...]
+    task_limits_by_job: tuple[tuple[str, int, float, float], ...]
+
+    def __post_init__(self) -> None:
+        for name in ("cycle_id", "plan_revision_id", "executor_id", "executor_version"):
+            _identifier(getattr(self, name), name)
+        _digest(self.plan_content_digest, "plan_content_digest")
+        _digest(self.objective_digest, "objective_digest")
+        if (type(self.workspace_path) is not str or not self.workspace_path
+                or "\x00" in self.workspace_path):
+            raise ProfileConfigurationError("execution_workspace_path_invalid")
+        _digest(self.workspace_identity_digest, "workspace_identity_digest")
+        if (type(self.authorized_scope) is not tuple or not self.authorized_scope
+                or len(set(self.authorized_scope)) != len(self.authorized_scope)):
+            raise ProfileConfigurationError("execution_authorized_scope_invalid")
+        for item in self.authorized_scope:
+            _identifier(item, "execution_scope")
+        if (type(self.task_graph) is not tuple or not self.task_graph
+                or any(type(item) is not tuple or len(item) != 3
+                       or not all(type(value) is tuple for value in item[1:])
+                       for item in self.task_graph)):
+            raise ProfileConfigurationError("execution_task_graph_invalid")
+        if any(type(item[0]) is not str for item in self.task_graph):
+            raise ProfileConfigurationError("execution_task_graph_invalid")
+        task_ids = {item[0] for item in self.task_graph}
+        if len(task_ids) != len(self.task_graph):
+            raise ProfileConfigurationError("execution_task_graph_invalid")
+        for job_id, dependencies, task_scope in self.task_graph:
+            _identifier(job_id, "execution_job_id")
+            if (any(type(dep) is not str for dep in dependencies)
+                    or len(set(dependencies)) != len(dependencies)
+                    or any(type(dep) is not str or dep not in task_ids for dep in dependencies)
+                    or any(type(scope) is not str for scope in task_scope)
+                    or len(set(task_scope)) != len(task_scope)
+                    or any(scope not in self.authorized_scope for scope in task_scope)):
+                raise ProfileConfigurationError("execution_task_binding_invalid")
+        if (type(self.max_attempts_per_job) is not int or self.max_attempts_per_job < 1
+                or type(self.max_duration_seconds) not in (int, float)
+                or not math.isfinite(self.max_duration_seconds) or self.max_duration_seconds <= 0
+                or type(self.max_concurrency) is not int or self.max_concurrency != 1):
+            raise ProfileConfigurationError("execution_operational_limits_invalid")
+        if self.financial_budget_mode not in {"hard_cap_required", "estimated_cost_accepted"}:
+            raise ProfileConfigurationError("execution_financial_policy_invalid")
+        if (type(self.strategies_by_job) is not tuple
+                or any(type(item) is not tuple or len(item) != 2
+                       or type(item[1]) is not tuple or not item[1]
+                       or any(type(strategy) is not str
+                              or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", strategy)
+                              for strategy in item[1])
+                       for item in self.strategies_by_job)
+                or any(type(item[0]) is not str for item in self.strategies_by_job)
+                or {item[0] for item in self.strategies_by_job} != task_ids):
+            raise ProfileConfigurationError("execution_strategies_invalid")
+        if (type(self.task_limits_by_job) is not tuple
+                or any(type(item) is not tuple or len(item) != 4
+                       or type(item[1]) is not int or item[1] < 1
+                       or type(item[2]) not in (int, float) or not math.isfinite(item[2])
+                       or item[2] <= 0 or type(item[3]) not in (int, float)
+                       or not math.isfinite(item[3]) or item[3] < 0
+                       for item in self.task_limits_by_job)
+                or any(type(item[0]) is not str for item in self.task_limits_by_job)
+                or {item[0] for item in self.task_limits_by_job} != task_ids):
+            raise ProfileConfigurationError("execution_task_limits_invalid")
+
+    def to_payload(self) -> dict:
+        return {
+            "cycle_id": self.cycle_id, "plan_revision_id": self.plan_revision_id,
+            "plan_content_digest": self.plan_content_digest,
+            "objective_digest": self.objective_digest,
+            "workspace_path": self.workspace_path,
+            "workspace_identity_digest": self.workspace_identity_digest,
+            "authorized_scope": list(self.authorized_scope),
+            "task_graph": [[job, list(deps), list(scope)]
+                           for job, deps, scope in self.task_graph],
+            "executor_id": self.executor_id, "executor_version": self.executor_version,
+            "max_attempts_per_job": self.max_attempts_per_job,
+            "max_duration_seconds": self.max_duration_seconds,
+            "max_concurrency": self.max_concurrency,
+            "financial_budget_mode": self.financial_budget_mode,
+            "strategies_by_job": [[job, list(strategies)]
+                                   for job, strategies in self.strategies_by_job],
+            "task_limits_by_job": [list(item) for item in self.task_limits_by_job],
+        }
+
+    @classmethod
+    def from_payload(cls, value: dict) -> "ExecutionPlanConsentBinding":
+        expected = {"cycle_id", "plan_revision_id", "plan_content_digest", "objective_digest", "workspace_path",
+                    "workspace_identity_digest", "authorized_scope", "task_graph",
+                    "executor_id", "executor_version", "max_attempts_per_job",
+                    "max_duration_seconds", "max_concurrency", "financial_budget_mode",
+                    "strategies_by_job", "task_limits_by_job"}
+        if type(value) is not dict or set(value) != expected:
+            raise ProfileConfigurationError("execution_plan_binding_fields_invalid")
+        try:
+            return cls(
+                value["cycle_id"], value["plan_revision_id"], value["plan_content_digest"],
+                value["objective_digest"],
+                value["workspace_path"],
+                value["workspace_identity_digest"], tuple(value["authorized_scope"]),
+                tuple((item[0], tuple(item[1]), tuple(item[2])) for item in value["task_graph"]),
+                value["executor_id"], value["executor_version"],
+                value["max_attempts_per_job"], value["max_duration_seconds"],
+                value["max_concurrency"], value["financial_budget_mode"],
+                tuple((item[0], tuple(item[1])) for item in value["strategies_by_job"]),
+                tuple(tuple(item) for item in value["task_limits_by_job"]),
+            )
+        except (KeyError, TypeError, IndexError) as exc:
+            raise ProfileConfigurationError("execution_plan_binding_invalid") from exc
+
+
+@dataclass(frozen=True)
+class LocalExecutionConsentRequest(LocalConsentRequest):
+    """Distinct consent request that covers execution of the complete plan."""
+
+    execution_binding: ExecutionPlanConsentBinding
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.execution_binding, ExecutionPlanConsentBinding):
+            raise ProfileConfigurationError("execution_plan_binding_required")
+        operations = tuple(sorted("job:" + item[0]
+                                  for item in self.execution_binding.task_graph))
+        if (tuple(sorted(self.allowed_operations)) != operations
+                or len(operations) > self.limits.max_jobs
+                or self.execution_binding.max_duration_seconds > self.limits.timeout_seconds
+                or self.execution_binding.cycle_id == ""):
+            raise ProfileConfigurationError("execution_consent_plan_binding_mismatch")
+        if (self.execution_binding.financial_budget_mode == "estimated_cost_accepted"
+                and self.limits.estimated_budget <= 0):
+            raise ProfileConfigurationError("explicit_execution_budget_required")
+
+    @property
+    def request_digest(self) -> str:
+        payload = {"consent_request_digest": super().request_digest,
+                   "execution_binding": self.execution_binding.to_payload()}
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=False)
         return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

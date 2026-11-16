@@ -271,9 +271,9 @@ def test_task_completion_requires_validated_attempt_and_git_verification(tmp_pat
         task = plan.tasks[0]
         definition_digest = ws_request.definition_digest
         spec = ProcessSpec(Path(sys.executable), (), workspace.path, "do task", (), "fake", "test",
-                           "workspace-write", "never")
+                           "unknown", "never")
         request = ExecutionRequest("demo", "first", 1, definition_digest, "execution-complete",
-                                   workspace.path, "do task", ExecutionPolicy(sandbox="workspace-write", approval="never"),
+                                   workspace.path, "do task", ExecutionPolicy(approval="never"),
                                    (("ok", "Answer exists"),), workspace.workspace_id)
         attempt = store.prepare(request, spec, "test-owner")
         result = ProcessResult("process_succeeded", 0, tmp_path / "out", tmp_path / "err",

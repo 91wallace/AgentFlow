@@ -33,7 +33,7 @@ class FakeAdapter:
     def prepare(self, request):
         self.request = request
         return ProcessSpec(Path("codex"), (), request.workspace, request.instruction,
-                           (), "fake", "test", "read-only", "never")
+                           (), "fake", "test", "unknown", "never")
 
     def interpret(self, result):
         return AgentResult(result.status, "turn.completed")
@@ -88,12 +88,11 @@ def test_synthetic_workspace_is_a_real_git_root_without_remotes(tmp_path):
     assert remotes == ""
 
 
-def test_codex_planner_decodes_structured_proposal_and_uses_read_only_request(tmp_path):
+def test_codex_planner_decodes_structured_proposal_without_native_mode_overrides(tmp_path):
     provider = adapter(tmp_path, text=json.dumps(valid_mapping()))
     proposal = provider.propose(context())
     assert proposal.source_revision_id == "revision-1"
     assert proposal.changes[0].task.job_id == "second"
-    assert provider.agent_adapter.request.policy.sandbox == "read-only"
     assert provider.agent_adapter.request.policy.approval == "never"
     assert Path(provider.runtime.workspace_root).resolve() == provider.agent_adapter.request.workspace.resolve()
     assert provider.runtime.workspace_remotes == ""

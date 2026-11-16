@@ -18,9 +18,13 @@ from .restricted_worker import (CapabilityProbe, IsolationControl, IsolationEvid
                                 TerminationStatus, WorkerLaunchResult, WorkerStatus,
                                 WorkerTerminationResult, decode_worker_proposal)
 from .authorized_execution import (AuthorizedExecutionController, AuthorizedExecutionError,
-                                   ExecutionLimits, NoEffectExecutionError,
+                                   ExecutionLimits, TaskExecutionLimits, NoEffectExecutionError,
                                    SQLiteAuthorizedExecutionStore,
-                                   VerifiedExecutionGrant)
+                                   VerifiedExecutionGrant, BrokerExecutionGrantResolver,
+                                   FinancialBudgetMode, LocalExecutionContract,
+                                   LocalExecutionContractResolver,
+                                   LocalAuthorizedExecutionService,
+                                   FinancialBudgetPolicy)
 
 __all__ = ["APLState", "APLLimits", "CycleSnapshot", "Evaluation",
            "ExecutionOutcome", "JobProposal", "Planner", "Executor",
@@ -37,6 +41,23 @@ __all__ += ["CapabilityProbe", "IsolationControl", "IsolationEvidence", "Isolati
             "TerminationStatus", "WorkerLaunchResult", "WorkerStatus", "WorkerTerminationResult",
             "decode_worker_proposal"]
 __all__ += ["AuthorizedExecutionController", "AuthorizedExecutionError", "ExecutionLimits",
-            "NoEffectExecutionError", "SQLiteAuthorizedExecutionStore", "VerifiedExecutionGrant"]
+            "TaskExecutionLimits",
+            "NoEffectExecutionError", "SQLiteAuthorizedExecutionStore", "VerifiedExecutionGrant",
+            "BrokerExecutionGrantResolver", "FinancialBudgetMode", "FinancialBudgetPolicy"]
+__all__ += ["LocalExecutionContract", "LocalExecutionContractResolver",
+            "LocalAuthorizedExecutionService"]
+from .codex_execution import (AcceptanceEvaluation, CodexAcceptanceEvidenceValidator,
+                              CodexAuthorizedJobExecutor, CodexExecutionError,
+                              PinnedWorkspace, PlanGateAcceptanceVerifier)
+__all__ += ["CodexAcceptanceEvidenceValidator", "CodexAuthorizedJobExecutor",
+            "CodexExecutionError", "PinnedWorkspace", "AcceptanceEvaluation",
+            "PlanGateAcceptanceVerifier"]
 from .codex_planner import CodexCLIPlannerAdapter
 __all__ += ["CodexCLIPlannerAdapter"]
+from .failure_recovery import (EffectState, FailureDiagnosis, FailureKind,
+                               IntelligentFailureRecoveryPolicy, PriorFailure,
+                               QualityResult, Recoverability, RecoveryContext,
+                               RecoveryDecision, RecoveryLimits)
+__all__ += ["EffectState", "FailureDiagnosis", "FailureKind",
+            "IntelligentFailureRecoveryPolicy", "PriorFailure", "QualityResult",
+            "Recoverability", "RecoveryContext", "RecoveryDecision", "RecoveryLimits"]

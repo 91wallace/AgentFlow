@@ -13,21 +13,19 @@ from .contracts import (AgentAvailability, AgentCapabilities, AgentResult, Execu
                         normalize_execution_state)
 
 
-TESTED_VERSIONS = {"0.166.0"}
+TESTED_VERSIONS = {"0.166.0", "0.169.0"}
 
 
 class CodexAdapter:
     adapter_id = "codex"
     api_version = "1"
 
-    def __init__(self, executable: Path | None = None, *, allow_unverified_version: bool = False,
-                 trust_workspace_for_invocation: bool = False):
+    def __init__(self, executable: Path | None = None, *, allow_unverified_version: bool = False):
         resolved = str(executable) if executable else shutil.which("codex")
         if not resolved or not Path(resolved).is_file():
             raise ExecutionError("Codex CLI não encontrado")
         self.executable = Path(resolved).resolve()
         self.allow_unverified_version = allow_unverified_version
-        self.trust_workspace_for_invocation = trust_workspace_for_invocation
 
     def discover(self) -> AgentAvailability:
         checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -88,18 +86,16 @@ class CodexAdapter:
         if not match or (match.group(1) not in TESTED_VERSIONS and not self.allow_unverified_version):
             raise ExecutionError("versão Codex CLI não homologada")
         help_text = self._probe("exec", "--help")
-        required = ("--sandbox", "--config", "--json", "--cd", "--strict-config")
-        if any(flag not in help_text for flag in required) or any(value not in help_text for value in
-                ("read-only", "workspace-write", "danger-full-access")):
+        required = ("--json", "--cd", "--strict-config")
+        if any(flag not in help_text for flag in required):
             raise ExecutionError("Codex CLI não oferece capacidades exigidas")
         global_help = self._probe("--help")
         if "--ask-for-approval" not in global_help or "never" not in global_help or "on-request" not in global_help:
             raise ExecutionError("Codex CLI sem opção verificável de aprovação")
         self._probe("login", "status")
-        sandbox = request.policy.sandbox
         approval = request.policy.approval
-        if sandbox not in ("read-only", "workspace-write", "danger-full-access") or approval not in ("never", "on-request"):
-            raise ExecutionError("sandbox ou aprovação efetiva não verificável")
+        if approval not in ("never", "on-request"):
+            raise ExecutionError("política de aprovação inválida")
         if approval == "on-request":
             raise ExecutionError("aprovação interativa incompatível com execução não interativa")
         if not request.workspace.is_dir() or not (request.workspace / ".git").exists():
@@ -107,18 +103,14 @@ class CodexAdapter:
         # --ask-for-approval is a root-level Codex CLI option in 0.167.0;
         # placing it after `exec` is rejected by that command parser.
         workspace = request.workspace.resolve()
-        args = ["--ask-for-approval", approval]
-        if self.trust_workspace_for_invocation:
-            # Root-level CLI override; scoped to this exact workspace and this
-            # process only. It does not write user config.toml.
-            key = f'projects."{workspace.as_posix()}".trust_level="trusted"'
-            args.extend(("--config", key))
-        args.extend(("exec", "--strict-config", "--json", "-C", str(workspace)))
-        args.extend(("--sandbox", sandbox))
+        args = ["--ask-for-approval", approval,
+                "exec", "--strict-config", "--json", "-C", str(workspace)]
         args.append("-")
         return ProcessSpec(self.executable, tuple(args), request.workspace.resolve(), request.instruction,
-                           (), "codex", match.group(1), sandbox, approval,
-                           ("jsonl", "stdin", "strict-config", "sandbox", "approval-policy") +
+                           (("AGENTFLOW_MANAGED_EXECUTION", "1"),),
+                           "codex", match.group(1), "unknown", approval,
+                           ("jsonl", "stdin", "strict-config", "approval-policy",
+                            "native-sandbox-config-unmodified") +
                            (("experimental-unverified-version",) if match.group(1) not in TESTED_VERSIONS else ()))
 
     def interpret(self, result: ProcessResult) -> AgentResult:

@@ -9,6 +9,7 @@ import signal
 import subprocess
 import threading
 import time
+from typing import Callable
 from uuid import uuid4
 
 from agentflow.agents import (Cancellation, ExecutionPolicy, ProcessIdentity,
@@ -181,7 +182,8 @@ class LocalRuntime:
                 pass
 
     def run(self, spec: ProcessSpec, attempt_id: str, policy: ExecutionPolicy,
-            on_started: StartedCallback, cancel: Cancellation) -> ProcessResult:
+            on_started: StartedCallback, cancel: Cancellation,
+            before_spawn: Callable[[], None] | None = None) -> ProcessResult:
         if not spec.cwd.is_dir() or not spec.executable.is_file():
             raise SpawnFailure("executável ou diretório de trabalho inexistente")
         if not attempt_id.isascii() or not attempt_id.replace("-", "").isalnum():
@@ -255,6 +257,10 @@ class LocalRuntime:
             inherited = ("PATH", "HOME", "USERPROFILE", "CODEX_HOME", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA")
             env = {key: os.environ[key] for key in inherited if key in os.environ}
             env.update(dict(spec.environment))
+            # This is the final controlled point before CreateProcess/Popen.
+            # The state-store transaction cannot be atomic with the OS process creation.
+            if before_spawn is not None:
+                before_spawn()
             try:
                 process = subprocess.Popen([str(spec.executable), *spec.arguments], cwd=spec.cwd,
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
