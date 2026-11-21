@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Barrier, Event
 
 import pytest
 
@@ -320,16 +321,38 @@ def test_consume_is_authenticated_one_shot_and_replay_fails(tmp_path):
         store.close()
 
 
-def test_concurrent_consumption_has_one_winner(tmp_path):
+@pytest.mark.parametrize("schedule", ["both_verified", "second_reads_consumed"])
+def test_concurrent_consumption_has_one_winner(tmp_path, monkeypatch, schedule):
     store, authority = setup_authority(tmp_path)
     try:
         grant_id = authorize(authority).grant_id
+        first_finished = Event()
+        if schedule == "both_verified":
+            both_verified = Barrier(2)
+            verify = authority._verified_grant
 
-        def consume(_):
+            def verified_before_transition(*args, **kwargs):
+                result = verify(*args, **kwargs)
+                both_verified.wait(timeout=10)
+                return result
+
+            monkeypatch.setattr(authority, "_verified_grant", verified_before_transition)
+
+        def consume(index):
+            if schedule == "second_reads_consumed" and index == 1:
+                assert first_finished.wait(timeout=10)
             try:
                 return authority.consume(grant_id, proof="executor-proof", now=NOW).state
             except BrokerConflict:
                 return "replay_rejected"
+            except LocalAuthorizationError as exc:
+                # A later verifier observes the consumed state before the SQL CAS.
+                if str(exc) != "grant_consumed":
+                    raise
+                return "replay_rejected"
+            finally:
+                if index == 0:
+                    first_finished.set()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             states = list(pool.map(consume, range(2)))

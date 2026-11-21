@@ -1,5 +1,14 @@
 # Plano de implementação
 
+## Reorganização arquitetural — M0 autorizado
+
+Referência: [ADR 0017](decisions/0017-architecture-m0-baseline.md) e
+[inventário M0](architecture-m0-inventory.md). Esta etapa decide responsabilidades,
+atualiza governança e adiciona baseline/teste AST sobre o working tree atual.
+Não modifica o fluxo de produto, não extrai módulos nem executa agentes reais.
+M1 (fachadas/isolamento local), M2 (ciclos), M3 (extrações) e M4 (empacotamento/docs)
+continuam como roadmap com critérios de saída, sem autorização automática.
+
 Fatia autorizada: [ADR 0016](decisions/0016-progressive-master-plan-and-responsive-stdin.md),
 Plano Mestre sem teto de tamanho, hash streaming, plan_sections/índice paginado,
 recuperação por linhas no planejador sintético e stdin assíncrono com idle de

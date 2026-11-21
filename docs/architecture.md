@@ -1,5 +1,14 @@
 # Arquitetura do AgentFlow
 
+## Direção arquitetural vigente — M0
+
+A [ADR 0017](decisions/0017-architecture-m0-baseline.md) reconhece `apl` como
+camada oficial de coordenação e mantém `core.git` como serviço específico de
+compatibilidade. Contratos e protocolos serão desacoplados das implementações
+por fatias; M0 não movimenta módulos. O [inventário M0](architecture-m0-inventory.md)
+registra a dívida do working tree atual e o teste AST que bloqueia regressões.
+As fases históricas abaixo não substituem essas responsabilidades vigentes.
+
 A [ADR 0016](decisions/0016-progressive-master-plan-and-responsive-stdin.md)
 remove o teto do Plano Mestre e substitui sua injeção integral por recortes/índice
 e leitura progressiva mediada pelo digest. Stdin é alimentado em thread; o
@@ -55,9 +64,10 @@ Uma mudança de especificação é uma proposta sujeita a análise de impacto e 
 O nível de detalhe da spec é proporcional ao risco e à complexidade: tarefa simples pede objetivo, restrições necessárias e critérios observáveis; trabalho complexo adiciona pressupostos, interfaces, dependências, riscos e critérios mais granulares. Esta orientação não cria arquivos ou campos obrigatórios extras por si só. Reutilizar `Criterion`, `Task`, revisões/digests, DAG, eventos SQLite, `ModelSelection`, `WorkerAssignment`, Git checkpoints e gates F5 antes de introduzir entidades paralelas. A identidade do autor atual não é autenticação forte; registros auditáveis não devem ser descritos como prova criptográfica de autoria humana.
 
 ```text
-CLI -> core -> planning, state, agents, runtime, validation, git
-           \-> environment, delivery
-agents -> interface de runtime; adaptadores concretos ficam nas bordas
+CLI / composição -> apl (coordenação) -> contratos / protocolos
+                \-> core.git (coordenação Git específica)
+                \-> planning, state, agents, runtime, validation, git
+Adaptadores concretos ficam nas bordas; imports legados reversos constam no baseline M0.
 ```
 
 ## Limites dos módulos
@@ -65,7 +75,8 @@ agents -> interface de runtime; adaptadores concretos ficam nas bordas
 | Módulo | Responsabilidade e contrato planejado |
 | --- | --- |
 | `cli` | Analisa argumentos, apresenta resultados e traduz erros em códigos de saída; chama serviços por interfaces. |
-| `core` | Coordena transições e políticas; não conhece subprocessos, SQLite ou Docker diretamente. |
+| `apl` | Coordenação oficial dos ciclos, execução e recuperação; direção alvo por protocolos, com acoplamentos legados registrados em M0. |
+| `core` | Mantém `core.git` como serviço específico; não recebe um segundo orquestrador geral. A referência concreta a GitStateStore é dívida conhecida. |
 | `planning` | Lê especificações, tarefas, dependências e critérios; entrega plano validado e imutável ao núcleo. |
 | `state` | Repositório de estados, tentativas, eventos e retomada; implementação SQLite com transações em fase posterior. |
 | `agents` | Contratos agent/provider/model e adapters; Codex permanece compatível, F6 prepara Antigravity → Claude Code → OpenCode → Hermes Agent, sem seleção automática de modelos. |
