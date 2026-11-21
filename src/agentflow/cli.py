@@ -13,7 +13,6 @@ from . import __version__
 from .config import AGENTS, AgentChoice, Config, ConfigError, load_config, resolve_agent
 from .agents.factory import create_adapter
 from .execution_selection import read_selection, persist_selection
-from .security import SecurityProfile
 from .environment.doctor import diagnose
 from .init import InitError, initialize, repository_root
 from .planning import PlanError, load_plan
@@ -265,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     profile_select = profile_commands.add_parser("select", help="compatibilidade: não grava perfil nem habilita execução")
     profile_select.add_argument("--path", type=Path, default=Path.cwd())
     profile_select.add_argument("--profile", required=True,
-                                choices=tuple(item.value for item in SecurityProfile))
+                                choices=("LOCAL_SUPERVISED", "INDEPENDENT_AUTHORITY"))
     profile_select.add_argument("--confirm", action="store_true", required=True,
                                 help="confirma a seleção local persistente do perfil")
     codex_skill = commands.add_parser("codex-skill", help="instalar a Skill local do Codex CLI")

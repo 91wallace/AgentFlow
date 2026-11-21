@@ -1,5 +1,14 @@
 # Plano de implementação
 
+## Reorganização arquitetural — M1 autorizado
+
+Referência: [ADR 0018](decisions/0018-lean-facades-local-import-isolation.md).
+Fachadas públicas sob demanda; CLI sem import do perfil de segurança; testes
+em subprocessos novos com criptografia bloqueada, compatibilidade de exports e
+redução de uma exceção do baseline. A validação cobre fluxos com adaptadores
+simulados. M2 (ciclos), M3 (extrações) e M4 (empacotamento/docs) permanecem como
+próximos marcos, sem autorização automática.
+
 ## Reorganização arquitetural — M0 autorizado
 
 Referência: [ADR 0017](decisions/0017-architecture-m0-baseline.md) e

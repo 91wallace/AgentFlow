@@ -1,5 +1,14 @@
 # Arquitetura do AgentFlow
 
+## Fronteira local vigente — M1
+
+A [ADR 0018](decisions/0018-lean-facades-local-import-isolation.md) torna as
+fachadas `security`, `approval` e `apl` sob demanda, preservando seus exports.
+A CLI e os fluxos locais simulados operam sem importar a pilha avançada nem
+`cryptography`; testes em processos novos bloqueiam essas tentativas. O baseline
+AST cai de 29 para 28 exceções. Os ciclos continuam sendo trabalho de M2 e a
+dependência de instalação continua obrigatória até o empacotamento de M4.
+
 ## Direção arquitetural vigente — M0
 
 A [ADR 0017](decisions/0017-architecture-m0-baseline.md) reconhece `apl` como

@@ -14,7 +14,6 @@
     "local-to-advanced|agentflow.apl.broker_handoff|agentflow.approval.transport",
     "local-to-advanced|agentflow.cli|agentflow.approval.presentation",
     "local-to-advanced|agentflow.cli|agentflow.approval.transport",
-    "local-to-advanced|agentflow.cli|agentflow.security",
     "local-to-advanced|agentflow.recovery|agentflow.approval.protocol",
     "local-to-advanced|agentflow.recovery|agentflow.teg.contracts",
     "package-cycle|agentflow.apl.authorized_execution|agentflow.security.authorization",
