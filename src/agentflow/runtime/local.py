@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -32,8 +33,12 @@ def redact(data: bytes) -> bytes:
 
 
 class LocalRuntime:
-    def __init__(self, log_directory: Path):
+    def __init__(self, log_directory: Path, *, default_idle_seconds=300):
+        if default_idle_seconds is not None and (type(default_idle_seconds) not in (int, float)
+                or not math.isfinite(default_idle_seconds) or default_idle_seconds <= 0):
+            raise ValueError("default_idle_seconds must be positive or None")
         self.log_directory = log_directory
+        self.default_idle_seconds = default_idle_seconds
 
     @staticmethod
     def _linux_marker(pid: int) -> str:
@@ -253,6 +258,10 @@ class LocalRuntime:
 
         process = None
         job = None
+        workers = []
+        writer = None
+        stdin_failed = threading.Event()
+        timeout_reason = "timed_out"
         try:
             inherited = ("PATH", "HOME", "USERPROFILE", "CODEX_HOME", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA")
             env = {key: os.environ[key] for key in inherited if key in os.environ}
@@ -283,12 +292,28 @@ class LocalRuntime:
                        for index, stream in enumerate((process.stdout, process.stderr))]
             for worker in workers:
                 worker.start()
-            try:
-                process.stdin.write(spec.stdin.encode("utf-8"))
-                process.stdin.close()
-            except BrokenPipeError:
-                pass
+            def feed_stdin():
+                try:
+                    for offset in range(0, len(spec.stdin), 65536):
+                        process.stdin.write(spec.stdin[offset:offset + 65536].encode("utf-8"))
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                except (OSError, UnicodeError, ValueError):
+                    stdin_failed.set()
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    except OSError:
+                        stdin_failed.set()
+
+            # The child may fill stdout before reading stdin. Never block the watchdog.
+            writer = threading.Thread(target=feed_stdin, name=f"agentflow-stdin-{attempt_id}", daemon=True)
+            activity[0] = time.monotonic()
             deadline = time.monotonic() + policy.timeout_seconds
+            idle_seconds = policy.idle_seconds if policy.idle_seconds is not None else self.default_idle_seconds
+            writer.start()
             status = ""
             while process.poll() is None:
                 flag = directory / "cancel.flag"
@@ -298,14 +323,15 @@ class LocalRuntime:
                 if exceeded.is_set():
                     status = "process_failed"
                     break
-                if log_failed.is_set():
+                if log_failed.is_set() or stdin_failed.is_set():
                     status = "process_failed"
                     break
                 if time.monotonic() >= deadline:
                     status = "timed_out"
                     break
-                if policy.idle_seconds is not None and time.monotonic() - activity[0] >= policy.idle_seconds:
+                if idle_seconds is not None and time.monotonic() - activity[0] >= idle_seconds:
                     status = "timed_out"
+                    timeout_reason = "idle_timeout"
                     break
                 time.sleep(0.02)
             if status:
@@ -320,14 +346,21 @@ class LocalRuntime:
                     self._terminate_tree(process, job)
                     if not status:
                         status = "process_failed"
+            if job is not None:
+                job.close()
+                job = None
+            writer.join(timeout=5)
+            if writer.is_alive():
+                raise RuntimeError("stdin writer did not stop after process termination")
             for worker in workers:
                 worker.join(timeout=5)
             if not status and (cancel.is_set() or (directory / "cancel.flag").exists()):
                 status = "cancelled"
             if not status:
                 status = "process_succeeded" if process.returncode == 0 else "process_failed"
-            reason = "log_write_failed" if log_failed.is_set() else "log_limit" if exceeded.is_set() else status
-            if log_failed.is_set():
+            reason = ("log_write_failed" if log_failed.is_set() else "stdin_write_failed" if stdin_failed.is_set()
+                      else "log_limit" if exceeded.is_set() else timeout_reason if status == "timed_out" else status)
+            if log_failed.is_set() or stdin_failed.is_set():
                 status = "process_failed"
             result = ProcessResult(status, process.returncode, stdout_path, stderr_path,
                                    digests[0].hexdigest(), digests[1].hexdigest(), counts[0], counts[1],
@@ -356,5 +389,13 @@ class LocalRuntime:
                 self._terminate_tree(process, job)
             if job is not None:
                 job.close()
+            if writer is not None and writer.ident is not None:
+                writer.join(timeout=5)
+            writer_alive = writer is not None and writer.is_alive()
+            for worker in workers:
+                if worker.ident is not None:
+                    worker.join(timeout=5)
             for handle in handles:
                 handle.close()
+            if writer_alive:
+                raise RuntimeError("stdin writer did not stop after process termination")

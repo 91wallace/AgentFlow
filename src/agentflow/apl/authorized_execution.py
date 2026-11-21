@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import re
 import sqlite3
 import time
@@ -550,8 +551,12 @@ class ResultEvidenceValidator(Protocol):
 class SQLiteAuthorizedExecutionStore:
     """Append-only execution journal sharing the APL SQLite database."""
 
-    def __init__(self, database_path: str):
+    def __init__(self, database_path: str, *, initialize: bool = True):
         self.database_path = str(database_path)
+        if not initialize:
+            if not Path(self.database_path).is_file():
+                raise AuthorizedExecutionError("execution_store_missing")
+            return
         with sqlite3.connect(self.database_path, timeout=10) as db:
             db.execute("PRAGMA busy_timeout=10000")
             db.executescript("""
@@ -841,7 +846,8 @@ class SQLiteAuthorizedExecutionStore:
                    (run_id, job_id, event_type, payload_json, occurred_at, previous_digest, event_digest))
 
     def load(self, run_id: str) -> dict:
-        with sqlite3.connect(self.database_path, timeout=10) as db:
+        with sqlite3.connect(Path(self.database_path).resolve().as_uri() + "?mode=ro",
+                             uri=True, timeout=10) as db:
             db.row_factory = sqlite3.Row
             row = db.execute("SELECT * FROM apl_authorized_runs WHERE run_id=?", (run_id,)).fetchone()
             if row is None:
@@ -1964,7 +1970,7 @@ class AuthorizedExecutionController:
                 continue
             data = json.loads(task["outcome_json"])
             outcome = ExecutionOutcome(data["status"], data["summary"], tuple(data["evidence"]),
-                                       data["cost"], data["progress_key"])
+                                       data["cost"], data["progress_key"], data.get("handoff"))
             prior = persisted.get(task["job_id"])
             if prior is not None and prior != outcome:
                 raise AuthorizedExecutionError("apl_outcome_conflicts_with_verified_run_checkpoint")

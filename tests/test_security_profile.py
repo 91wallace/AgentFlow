@@ -142,7 +142,7 @@ def test_consent_contract_rejects_invalid_limits_and_naive_time():
         _request(datetime(2026, 1, 1))
 
 
-def test_profile_cli_select_and_status_report_inert_capabilities(tmp_path, monkeypatch, capsys):
+def test_profile_cli_selection_is_obsolete_and_does_not_write_configuration(tmp_path, monkeypatch, capsys):
     import agentflow.cli as cli
 
     root = tmp_path / "project"
@@ -151,22 +151,25 @@ def test_profile_cli_select_and_status_report_inert_capabilities(tmp_path, monke
     assert cli.main(["profile", "select", "--path", str(root),
                      "--profile", "LOCAL_SUPERVISED", "--confirm"]) == 0
     selected = json.loads(capsys.readouterr().out)
-    assert selected["profile"] == "LOCAL_SUPERVISED"
-    assert selected["configuration_status"] == "configured_not_homologated"
+    assert selected["profile"] is None
+    assert selected["configuration_status"] == "not_required"
+    assert not (root / ".agentflow" / "security-profile.toml").exists()
     assert selected["grant_issuance_enabled"] is False
     assert selected["dispatch_enabled"] is False
     assert cli.main(["profile", "status", "--path", str(root)]) == 0
     status = json.loads(capsys.readouterr().out)
-    assert status["profile"] == "LOCAL_SUPERVISED"
+    assert status["profile"] is None
 
 
-def test_profile_cli_missing_config_fails_closed(tmp_path, monkeypatch, capsys):
+def test_profile_cli_missing_config_is_not_a_local_execution_blocker(tmp_path, monkeypatch, capsys):
     import agentflow.cli as cli
 
     root = tmp_path / "project"
     (root / ".agentflow").mkdir(parents=True)
     monkeypatch.setattr(cli, "repository_root", lambda _path: root)
-    assert cli.main(["profile", "status", "--path", str(root)]) == 2
+    assert cli.main(["profile", "status", "--path", str(root)]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["profile"] is None
     assert status["dispatch_enabled"] is False
+    assert status["authentication_required"] is False
+    assert status["configuration_status"] == "not_required"

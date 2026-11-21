@@ -26,7 +26,7 @@ def test_version_cli(capsys):
 
 
 @pytest.mark.parametrize("raw", [
-    b"schema_version = true", b"schema_version = 2", b"runtime = 3",
+    b"schema_version = true", b"schema_version = 3", b"runtime = 3",
     b'runtime = "remote"', b'agent = "other"', b"unknown = 1", b"[bad]",
     b"not toml", b"\xff",
 ])
@@ -115,7 +115,7 @@ def test_doctor_requirements_and_optional_absence():
     local = diagnose(Config(), missing, (3, 13))
     assert [(c.name, c.required, c.status) for c in local] == [
         ("Python", True, "ok"), ("Git", True, "ok"),
-        ("Codex CLI", False, "missing"), ("Docker", False, "missing")]
+        ("Codex CLI", True, "missing"), ("Docker", False, "missing")]
     selected = diagnose(Config(1, "docker", "codex"), missing, (3, 10))
     assert all(c.required for c in selected)
     assert selected[0].status == "error"
@@ -126,7 +126,7 @@ def test_doctor_exit_codes(tmp_path, monkeypatch, capsys):
     assert main(["doctor", "--path", str(root)]) == 2
     initialize(root)
     monkeypatch.setattr("agentflow.cli.diagnose", lambda config: diagnose(config, lambda exe, args: ("ok", "v") if exe == "git" else ("missing", "absent"), (3, 13)))
-    assert main(["doctor", "--path", str(root)]) == 0
+    assert main(["doctor", "--path", str(root)]) == 1
     assert "Docker: missing (opcional)" in capsys.readouterr().out
     (root / ".agentflow" / "config.toml").write_text('schema_version = 1\nagent = "codex"')
     assert main(["doctor", "--path", str(root)]) == 1

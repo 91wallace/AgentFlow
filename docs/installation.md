@@ -1,6 +1,14 @@
 # Instalação e uso da Fase 1
 
-Requisitos: Python 3.11+ e Git. Codex CLI e Docker são opcionais no perfil local padrão. Nenhum agente é executado nesta fase.
+Provider/modelo são opcionais: sem perfil ou argumentos, vale o padrão nativo
+do CLI escolhido, conforme a [ADR 0015](decisions/0015-native-cli-model-defaults.md).
+
+Atualização: a [ADR 0014](decisions/0014-invoker-agent-selection.md) documenta
+seleção por integração chamadora, configuração v2 e perfis dos quatro agentes.
+Escolher um executor não altera o padrão do projeto; retomar preserva a escolha
+persistida. As instruções históricas abaixo sobre Codex referem-se ao default.
+
+Requisitos: Python 3.11+ e Git; Codex CLI para planejamento/execução local. Docker é opcional. `init` não executa agentes. Perfil de segurança, senha AgentFlow e WebAuthn não são necessários.
 
 ```shell
 python -m pip install .
@@ -19,12 +27,12 @@ Arquivo `.agentflow/config.toml`:
 ```toml
 schema_version = 1
 runtime = "local"
-agent = "none"
+agent = "codex"
 ```
 
-`schema_version` é um inteiro e atualmente só aceita `1`. `runtime` aceita `local` ou `docker`. `agent` aceita `none` ou `codex`. Campos ausentes assumem os valores acima; campos desconhecidos, tipos errados e versões não suportadas são erros. A seleção de Docker ou Codex apenas muda os requisitos avaliados por `doctor`; não habilita execução nesta fase.
+`schema_version` aceita o inteiro `1`; `runtime` aceita `local` ou `docker`; `agent` aceita `codex` ou `none` legado, que agora resolve para Codex sem reescrever o arquivo. Campos ausentes assumem os valores acima; campos desconhecidos, tipos errados e versões incompatíveis são erros. A inicialização preserva arquivos existentes. Use `agentflow run "<objetivo>"` ou `agentflow run` para ler `TASKS.json` na raiz. `--tasks-file backlog.json` seleciona outro arquivo. Consulte formatos e limites na [ADR 0011](decisions/0011-local-default-agent-and-backlog.md).
 
-`agentflow doctor --path caminho/do/repositorio` mostra Python, Git, Codex CLI e Docker separadamente. Saída 0 significa que todos os requisitos obrigatórios do perfil estão disponíveis; 1 significa requisito obrigatório ausente ou inválido; 2 significa argumentos, caminho ou configuração inválidos. Python e Git são sempre obrigatórios. Codex é obrigatório somente se `agent = "codex"`; Docker somente se `runtime = "docker"`. A sondagem verifica versões/comandos disponíveis, não autenticação nem funcionamento do daemon Docker.
+`agentflow doctor --path caminho/do/repositorio` mostra Python, Git, Codex CLI e Docker. Saída 0 indica requisitos disponíveis; 1 indica requisito obrigatório ausente/inválido; 2 indica argumentos, caminho ou configuração inválidos. Python, Git e Codex são obrigatórios; Docker somente se `runtime = "docker"`. A sondagem não verifica autenticação nativa nem funcionamento do daemon Docker. `profile status` informa `not_required`; comandos antigos de enrollment não cadastram credenciais.
 
 Para desenvolvimento: `python -m pip install '.[test]'` e `python -m pytest -q`. A CI executa essas verificações em Ubuntu com Python 3.11, 3.12 e 3.13.
 

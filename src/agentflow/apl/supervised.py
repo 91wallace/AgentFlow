@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 from uuid import uuid4
 from hashlib import sha256
+from agentflow.planning.prompts import task_instruction
 
 from .contracts import APLState, CycleSnapshot, ExecutionOutcome, JobProposal
 from .contracts import (EvidenceReference, PlanProposal, ReplanContext,
@@ -25,7 +26,7 @@ class SupervisedCycleService:
         scope = tuple(sorted(set(authorized_scope)))
         if not objective.strip() or not scope:
             raise ValueError("objective and explicit authorized scope are required")
-        jobs = tuple(JobProposal(task.id, f"{task.title}\n\n{task.description}", task.depends_on,
+        jobs = tuple(JobProposal(task.id, task_instruction(task), task.depends_on,
                                  task.versioned_paths or (f"task:{task.id}",), tuple(c.id for c in task.acceptance_criteria))
                      for task in (next(item for item in plan.tasks if item.id == task_id) for task_id in plan.order))
         outside = [job.job_id for job in jobs if not set(job.required_scope) <= set(scope)]

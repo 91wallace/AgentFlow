@@ -50,7 +50,7 @@ class AntigravityAdapter:
 
     def prepare(self, request: ExecutionRequest) -> ProcessSpec:
         selection = request.model_selection
-        if selection is None or selection.mode != "manual" or selection.agent_id != self.adapter_id:
+        if selection is not None and (selection.mode != "manual" or selection.agent_id != self.adapter_id):
             raise ExecutionError("Antigravity exige seleção explícita de modelo por tentativa")
         # Native execution settings belong to this agent CLI; AgentFlow does not
         # inject or translate sandbox modes into the invocation.
@@ -70,9 +70,9 @@ class AntigravityAdapter:
         required = ("--input-format", "--output-format", "--model", "--print-timeout")
         if any(flag not in help_text for flag in required):
             raise ExecutionError("Antigravity CLI sem capabilities headless obrigatórias")
-        available_models = self._probe("models")
-        model = selection.model_id
-        if not any(line_match and line_match.group(1) == model
+        available_models = self._probe("models") if selection else ""
+        model = selection.model_id if selection else ""
+        if selection and not any(line_match and line_match.group(1) == model
                    for line in available_models.splitlines()
                    for line_match in [_MODEL_LINE.match(line)]):
             raise ExecutionError("modelo Antigravity não confirmado no catálogo local")
@@ -81,13 +81,13 @@ class AntigravityAdapter:
         return ProcessSpec(
             self.executable,
             ("--input-format", "stream-json", "--output-format", "stream-json",
-             "--model", model, "--print-timeout", f"{request.policy.timeout_seconds}s"),
+             *(("--model", model) if selection else ()), "--print-timeout", f"{request.policy.timeout_seconds}s"),
             request.workspace.resolve(), message, (), self.adapter_id, version,
             "unknown", "unknown",
-            ("headless", "stream-json", "manual-model", "model-inventory-checked",
+            ("headless", "stream-json", "manual-model" if selection else "native-default-model", "model-inventory-checked" if selection else "native-default-selection",
              "permission-mode-observable", "native-sandbox-config-unmodified",
              "network-enforcement-unknown"), self.api_version,
-            selection.provider_id, model)
+            selection.provider_id if selection else "", model)
 
     def interpret(self, result: ProcessResult) -> AgentResult:
         if result.status != "process_succeeded":
@@ -106,16 +106,17 @@ class AntigravityAdapter:
         if len(init) != 1 or len(terminal) != 1 or not isinstance(init[0], dict) or not isinstance(terminal[0], dict):
             raise ExecutionError("stream Antigravity sem init/result únicos")
         effective_model = init[0].get("model")
-        if not isinstance(effective_model, str) or not effective_model:
+        if requested_model and (not isinstance(effective_model, str) or not effective_model):
             return AgentResult("process_succeeded", "modelo efetivo desconhecido",
                                effective_model_id="unknown", selection_status="unknown")
-        if effective_model != requested_model:
+        if requested_model and effective_model != requested_model:
             return AgentResult("process_succeeded", "modelo efetivo diverge da seleção",
                                effective_model_id=effective_model, selection_status="mismatch")
+        effective_model = effective_model if isinstance(effective_model, str) and effective_model else "unknown"
         status = terminal[0].get("status")
         if status != "SUCCESS":
             return AgentResult("process_failed", f"status Antigravity: {status or 'unknown'}",
-                               effective_model_id=effective_model, selection_status="confirmed")
+                               effective_model_id=effective_model, selection_status="confirmed" if requested_model else "unknown")
         try:
             diagnostics = result.stderr_path.read_text(encoding="utf-8").casefold()
         except OSError:
@@ -125,5 +126,5 @@ class AntigravityAdapter:
         else:
             summary = "result.success"
         return AgentResult("process_succeeded", summary,
-                           effective_provider_id=metadata.get("provider_id", "unknown"),
-                           effective_model_id=effective_model, selection_status="confirmed")
+                           effective_provider_id=metadata.get("provider_id") or "unknown",
+                           effective_model_id=effective_model, selection_status="confirmed" if requested_model else "unknown")

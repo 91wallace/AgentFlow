@@ -69,10 +69,15 @@ class InitialPlanningContext:
     workspace_digest: str
     strategy: ValidationStrategy
     validation_scope_paths: tuple[str, ...] = ()
+    master_plan: str = ""
+    master_reference: Any = None
 
     def to_mapping(self) -> dict[str, Any]:
         return {
             "objective": self.objective,
+            "master_plan_markdown": self.master_plan if self.master_reference is None else "",
+            "master_plan_context": json.loads(self.master_plan) if self.master_reference and self.master_plan else None,
+            "master_plan_reference": self.master_reference.reference() if self.master_reference else None,
             "workspace_files": list(self.inventory),
             "technology_markers": list(self.technologies),
             "allowed_scope_paths": list(self.allowed_paths),
@@ -344,7 +349,7 @@ def detect_validation_strategy(root: Path) -> ValidationStrategy:
 
 def create_context(root: Path, objective: str) -> InitialPlanningContext:
     objective = objective.strip()
-    if not objective or len(objective.encode("utf-8")) > 8192:
+    if not objective:
         raise InitialPlanningError("objective_length_invalid")
     root = root.resolve(strict=True)
     inventory, technologies, workspace_digest = _workspace_inventory(root)

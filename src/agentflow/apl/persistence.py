@@ -68,7 +68,7 @@ class SQLiteCycleStore:
     def _decode(encoded):
         d = json.loads(encoded)
         jobs = tuple(JobProposal(j["job_id"], j["instruction"], tuple(j["depends_on"]), tuple(j["required_scope"]), tuple(j["acceptance_criteria"])) for j in d["jobs"])
-        outcomes = tuple((job, ExecutionOutcome(o["status"], o["summary"], tuple(o["evidence"]), o["cost"], o["progress_key"])) for job, o in d["outcomes"])
+        outcomes = tuple((job, ExecutionOutcome(o["status"], o["summary"], tuple(o["evidence"]), o["cost"], o["progress_key"], o.get("handoff"))) for job, o in d["outcomes"])
         return CycleSnapshot(d["cycle_id"], d["objective"], tuple(d["authorized_scope"]), APLState(d["state"]),
                              jobs, outcomes,
                              d["iterations"], d["consumed_budget"], d["version"], d["reason"],

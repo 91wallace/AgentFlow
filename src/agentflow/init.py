@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess
 
-from .config import DEFAULT_TOML, ConfigError, load_config
+from .config import AGENTS, DEFAULT_TOML, ConfigError, load_config
 
 
 class InitError(ValueError):
@@ -25,7 +25,9 @@ def repository_root(path: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def initialize(path: Path) -> tuple[Path, bool]:
+def initialize(path: Path, *, agent: str | None = None) -> tuple[Path, bool]:
+    if agent is not None and agent not in AGENTS:
+        raise InitError(f"agente não suportado: {agent}")
     root = repository_root(path.resolve())
     directory = root / ".agentflow"
     target = directory / "config.toml"
@@ -35,14 +37,17 @@ def initialize(path: Path) -> tuple[Path, bool]:
         if target.is_symlink() or not target.is_file():
             raise InitError(f"conflito: {target} não é um arquivo regular")
         try:
-            load_config(target)
+            existing = load_config(target)
+            if agent is not None and existing.effective_agent != agent:
+                raise InitError("conflito: agente existente difere do solicitado")
         except ConfigError as exc:
             raise InitError(f"conflito em configuração existente: {exc}") from exc
         return root, False
     try:
         directory.mkdir(exist_ok=True)
         with target.open("x", encoding="utf-8", newline="\n") as stream:
-            stream.write(DEFAULT_TOML)
+            stream.write(DEFAULT_TOML if agent in (None, "codex") else
+                         f'schema_version = 2\nruntime = "local"\n\n[agents]\ndefault = "{agent}"\nselection = "invoker-or-default"\n')
     except FileExistsError:
         raise InitError(f"conflito: {target} já existe") from None
     except OSError as exc:

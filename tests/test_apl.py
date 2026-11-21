@@ -326,7 +326,9 @@ def test_cli_supervised_lifecycle_does_not_execute(tmp_path, monkeypatch, capsys
     assert "--enable-experimental-codex" in capsys.readouterr().err
     assert main(["apl", "next", *base, "--cycle-id", cycle_id]) == 0
     proposed = capsys.readouterr().out
-    assert "first" in proposed and "Nenhuma execução" in proposed
+    assert "Tarefa: first" in proposed
+    with ExecutionStore(state_path) as state:
+        assert state.db.execute("SELECT COUNT(*) FROM execution_attempts").fetchone()[0] == 0
     assert main(["apl", "pause", *base, "--cycle-id", cycle_id]) == 0
     assert "PAUSED" in capsys.readouterr().out
     assert main(["apl", "resume", *base, "--cycle-id", cycle_id]) == 0

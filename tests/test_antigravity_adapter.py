@@ -77,13 +77,14 @@ def test_unknown_versions_capabilities_or_model_fail_before_spawn(tmp_path, runn
         adapter(tmp_path, runner).prepare(make_request(tmp_path))
 
 
-def test_implicit_model_or_unmappable_policy_is_rejected(tmp_path):
+def test_implicit_model_uses_native_default_without_model_flag(tmp_path):
     subject = adapter(tmp_path)
     request = make_request(tmp_path)
-    with pytest.raises(ExecutionError, match="seleção explícita"):
-        subject.prepare(ExecutionRequest(request.project_id, request.task_id,
-            request.definition_revision, request.definition_digest, request.operation_id,
-            request.workspace, request.instruction, request.policy))
+    native = subject.prepare(ExecutionRequest(request.project_id, request.task_id,
+        request.definition_revision, request.definition_digest, request.operation_id,
+        request.workspace, request.instruction, request.policy))
+    assert "--model" not in native.arguments
+    assert native.model_id == native.provider_id == ""
     spec = subject.prepare(make_request(tmp_path))
     assert "--sandbox" not in spec.arguments
     assert spec.effective_sandbox == "unknown"

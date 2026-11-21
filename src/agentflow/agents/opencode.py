@@ -46,7 +46,7 @@ class OpenCodeAdapter:
 
     def prepare(self, request: ExecutionRequest) -> ProcessSpec:
         selection = request.model_selection
-        if (selection is None or selection.mode != "manual" or selection.agent_id != self.adapter_id
+        if selection is not None and (selection.mode != "manual" or selection.agent_id != self.adapter_id
                 or not _ID.fullmatch(selection.provider_id) or not _ID.fullmatch(selection.model_id)):
             raise ExecutionError("OpenCode exige seleção manual de provider/modelo válido")
         if not request.workspace.is_dir() or not (request.workspace / ".git").exists():
@@ -61,21 +61,21 @@ class OpenCodeAdapter:
         if "--pure" not in global_help or "--format" not in run_help or "--model" not in run_help:
             raise ExecutionError("OpenCode CLI sem capabilities headless obrigatórias")
         # Metadata-only inventory; do not refresh/download model catalogues.
-        inventory = self._probe("--pure", "models", selection.provider_id)
-        full_model = f"{selection.provider_id}/{selection.model_id}"
-        if full_model not in inventory.split():
+        inventory = self._probe("--pure", "models", selection.provider_id) if selection else ""
+        full_model = f"{selection.provider_id}/{selection.model_id}" if selection else ""
+        if selection and full_model not in inventory.split():
             raise ExecutionError("modelo OpenCode não confirmado no catálogo configurado")
         if len(request.instruction) > 8000:
             raise ExecutionError("instrução excede o limite seguro de argumento do OpenCode")
-        args = ("--pure", "run", "--format", "json", "--model", full_model, request.instruction)
+        args = ("--pure", "run", "--format", "json", *(("--model", full_model) if selection else ()), request.instruction)
         return ProcessSpec(
             self.executable, args, request.workspace.resolve(), "", (), self.adapter_id,
             version, "unknown", "unknown",
-            ("headless-run", "jsonl-output", "manual-model", "external-plugins-disabled-for-run",
-             "configured-model-inventory-checked",
+            ("headless-run", "jsonl-output", "manual-model" if selection else "native-default-model", "external-plugins-disabled-for-run",
+             "configured-model-inventory-checked" if selection else "native-default-selection",
              "native-sandbox-config-unmodified", "network-enforcement-unknown",
              "effective-model-requires-result-attestation"), self.api_version,
-            selection.provider_id, selection.model_id)
+            selection.provider_id if selection else "", selection.model_id if selection else "")
 
     def interpret(self, result: ProcessResult) -> AgentResult:
         if result.status != "process_succeeded":
@@ -101,6 +101,11 @@ class OpenCodeAdapter:
                         observed.add((provider, model))
             if event.get("type") in {"error", "session.error"}:
                 errors.append("OpenCode reportou erro estruturado")
+        if not requested_model:
+            provider, model = next(iter(observed)) if len(observed) == 1 else ("unknown", "unknown")
+            return AgentResult("process_failed" if errors else "process_succeeded",
+                               errors[0] if errors else "native CLI default; independent validation required",
+                               effective_provider_id=provider, effective_model_id=model, selection_status="unknown")
         if len(observed) > 1:
             return AgentResult("process_succeeded", "identidade efetiva ambígua",
                                selection_status="mismatch")

@@ -43,9 +43,13 @@ def diagnose(config: Config, probe: Probe = subprocess_probe,
                     f"{version[0]}.{version[1]} (requer >=3.11)")]
     for name, executable, args, required in (
         ("Git", "git", ("--version",), True),
-        ("Codex CLI", "codex", ("--version",), config.agent == "codex"),
+        ("Codex CLI", "codex", ("--version",), config.effective_agent == "codex"),
         ("Docker", "docker", ("--version",), config.runtime == "docker"),
     ):
         status, detail = probe(executable, args)
         checks.append(Check(name, required, status, detail))
+    if config.effective_agent != "codex":
+        executable = {"antigravity": "agy", "claude-code": "claude", "opencode": "opencode"}[config.effective_agent]
+        status, detail = probe(executable, ("--version",))
+        checks.append(Check(config.effective_agent, True, status, detail))
     return checks

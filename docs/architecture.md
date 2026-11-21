@@ -1,5 +1,41 @@
 # Arquitetura do AgentFlow
 
+A [ADR 0016](decisions/0016-progressive-master-plan-and-responsive-stdin.md)
+remove o teto do Plano Mestre e substitui sua injeção integral por recortes/índice
+e leitura progressiva mediada pelo digest. Stdin é alimentado em thread; o
+watchdog mantém timeout/cancelamento e idle configurável, padrão 300 segundos.
+
+A [ADR 0015](decisions/0015-native-cli-model-defaults.md) torna provider/modelo
+opcionais para todos os agentes: ausência de seleção usa o padrão do CLI,
+sem inventar identidade efetiva e sem alterar os gates independentes.
+
+A [ADR 0014](decisions/0014-invoker-agent-selection.md) acrescenta seleção por
+argumento explícito, integração chamadora ou padrão do projeto, com Codex como
+fallback de configuração. Executor/modelo ficam vinculados ao job; retomada
+não troca agente. Codex, Antigravity, OpenCode e Claude Code usam os adaptadores
+existentes sob o controlador genérico e o planejamento estruturado compartilhado.
+
+Atualização de handoff: a [ADR 0013](decisions/0013-dependency-handoffs.md)
+substitui a resposta em três linhas por JSON minificado persistido no outcome.
+`deps_context` contém apenas handoffs das dependências diretas, sem limite
+artificial em bytes ou truncamento. É contexto informativo, nunca prova de aceite.
+
+## Atualização local de 2026-11-20
+
+A [ADR 0011](decisions/0011-local-default-agent-and-backlog.md) prevalece sobre
+defaults e requisitos locais de perfil/autenticação descritos historicamente
+abaixo. `init` usa Codex; `none` legado resolve para Codex sem rewrite. O fluxo
+local não exige perfil, senha ou WebAuthn. `run` sem objetivo lê `TASKS.json`;
+o planejador deriva TOMLs/gates e o contrato operacional coordena a execução
+sem autenticação. Prompts são restritos à tarefa atual, com resposta concisa.
+Limites, evidências, cancelamento e recuperação continuam vigentes.
+
+A [ADR 0012](decisions/0012-master-plan-and-milestone-queue.md) separa o Plano
+Mestre Markdown (objetivo/limites, invariantes, marcos verticais e saídas) da
+fila JSON tipada. Apenas work do marco ativo entra no plano executável;
+marcos futuros não exigem decomposição antecipada. Passagem entre marcos exige
+resultado persistido compatível, nunca apenas um status declarado no JSON.
+
 ## Estado e objetivo
 
 O repositório versiona `README.md`, `LICENSE` Apache 2.0 e `autonomous-development-runner-v0.1.zip`. O protótipo extraído em `autonomous-development-runner/` está não versionado: pacote `adr`, CLI monolítica, estado em JSON e execução direta de `codex exec`. A Fase 1 entrega o pacote `agentflow`, uma suíte pytest e um workflow de CI para Python 3.11, 3.12 e 3.13, sem alterar esse protótipo nem ativar execução autônoma.

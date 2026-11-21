@@ -21,6 +21,7 @@ from typing import Callable, Protocol
 from threading import Event
 
 from agentflow.agents import ExecutionPolicy, ExecutionRequest, ProcessIdentity
+from agentflow.planning.prompts import next_task_prompt
 from agentflow.apl.contracts import ExecutionOutcome, JobProposal
 from .failure_recovery import QualityResult
 
@@ -86,7 +87,7 @@ class PlanGateAcceptanceVerifier:
     def evaluate(self, cycle_id: str, job: JobProposal,
                  outcome: ExecutionOutcome) -> AcceptanceEvaluation:
         receipts = [item for item in outcome.evidence
-                    if item.get("kind") == "codex_process_receipt"]
+                    if item.get("kind") in {"codex_process_receipt", "agent_process_receipt"}]
         executor_finished = bool(outcome.status == "succeeded" and len(receipts) == 1
                                  and receipts[0].get("process_status") == "process_succeeded")
         command_succeeded = bool(executor_finished and receipts[0].get("exit_code") == 0)
@@ -415,7 +416,7 @@ class PlanGateAcceptanceVerifier:
         return total
 
 
-class CodexAuthorizedJobExecutor:
+class AuthorizedJobExecutor:
     """Use CodexAdapter and LocalRuntime for one exact, already-authorized job.
 
     The executor requires an authoritative workspace resolver and never accepts
@@ -428,7 +429,7 @@ class CodexAuthorizedJobExecutor:
 
     def __init__(self, *, adapter, runtime, workspace_resolver: ExecutionWorkspaceResolver,
                  task_timeout_seconds: int = 1800, log_limit_bytes: int = 10 * 1024 * 1024,
-                 clock: Callable[[], datetime] | None = None):
+                 clock: Callable[[], datetime] | None = None, handoff_resolver=None):
         if (not callable(getattr(adapter, "prepare_task", None))
                 or not callable(getattr(adapter, "collect_result", None))
                 or not callable(getattr(runtime, "run", None))
@@ -439,6 +440,7 @@ class CodexAuthorizedJobExecutor:
         if type(log_limit_bytes) is not int or not 1 <= log_limit_bytes <= 50 * 1024 * 1024:
             raise ValueError("codex_log_limit_invalid")
         self.adapter, self.runtime = adapter, runtime
+        self.handoff_resolver = handoff_resolver
         self.workspace_resolver = workspace_resolver
         self.task_timeout_seconds, self.log_limit_bytes = task_timeout_seconds, log_limit_bytes
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -500,9 +502,13 @@ class CodexAuthorizedJobExecutor:
             raise CodexExecutionError("grant_task_timeout_below_runtime_resolution")
         criteria = tuple((f"criterion-{index + 1}", text)
                          for index, text in enumerate(job.acceptance_criteria))
+        from agentflow.planning.handoff import dependency_context, extract_codex_handoff
+        outcomes = self.handoff_resolver(cycle_id) if self.handoff_resolver else {}
+        instruction = next_task_prompt(job.job_id, job.instruction, job.required_scope,
+                                       dependency_context(job.depends_on, outcomes))
         request_data = {
             "cycle_id": cycle_id, "job_id": job.job_id,
-            "instruction": job.instruction, "depends_on": list(job.depends_on),
+            "instruction": instruction, "depends_on": list(job.depends_on),
             "required_scope": list(job.required_scope),
             "acceptance_criteria": list(job.acceptance_criteria),
             "grant_id": grant.grant_id, "plan_digest": grant.accepted_plan_digest,
@@ -518,7 +524,7 @@ class CodexAuthorizedJobExecutor:
             definition_digest=definition_digest,
             operation_id=operation_id,
             workspace=root,
-            instruction=job.instruction,
+            instruction=instruction,
             policy=ExecutionPolicy(timeout_seconds=timeout, log_limit_bytes=self.log_limit_bytes,
                                    approval="never"),
             acceptance_criteria=criteria,
@@ -529,17 +535,19 @@ class CodexAuthorizedJobExecutor:
                 or spec.adapter_version != grant.executor_version):
             raise CodexExecutionError("executor_binding_does_not_match_grant")
         if (Path(spec.cwd).resolve(strict=True) != root
-                or spec.effective_approval != "never"):
+                or grant.executor_id == "codex" and spec.effective_approval != "never"):
             raise CodexExecutionError("codex_process_policy_mismatch")
         result = self.runtime.run(spec, attempt_id or operation_id, request.policy, on_started,
                                   cancellation, before_spawn=pre_spawn_check)
         agent_result = self.adapter.collect_result(result)
         evidence = ({
-            "kind": "codex_process_receipt",
+            "kind": "codex_process_receipt" if grant.executor_id == "codex" else "agent_process_receipt",
+            "agent_id": grant.executor_id,
             "operation_id": operation_id,
             "attempt_id": attempt_id or operation_id,
             "strategy_id": strategy_id,
             "process_status": result.status,
+            "process_reason": result.reason,
             "exit_code": result.exit_code,
             "stdout_digest": result.stdout_digest,
             "stderr_digest": result.stderr_digest,
@@ -551,13 +559,20 @@ class CodexAuthorizedJobExecutor:
             "model_id": agent_result.effective_model_id,
             "workspace_identity_digest": actual_digest,
         },)
-        normalized = self.adapter.normalize_state(result.status)
+        normalized = self.adapter.normalize_state(agent_result.process_status)
         status = "succeeded" if normalized.value == "succeeded" else (
             "failed" if normalized.value == "failed" else "unknown")
-        return ExecutionOutcome(status, agent_result.summary, evidence, progress_key=operation_id)
+        handoff = extract_codex_handoff(result.stdout_path) if grant.executor_id == "codex" else None
+        if grant.executor_id != "codex":
+            from agentflow.planning.handoff import validate_handoff
+            try:
+                handoff = validate_handoff(json.loads(self.adapter.message_text(result.stdout_path)))
+            except (ValueError, OSError, RuntimeError):
+                pass
+        return ExecutionOutcome(status, agent_result.summary, evidence, progress_key=operation_id, handoff=handoff)
 
 
-class CodexAcceptanceEvidenceValidator:
+class AgentAcceptanceEvidenceValidator:
     """Require an explicit acceptance verifier; process exit is not task success."""
 
     def __init__(self, acceptance_verifier: ExecutionResultAcceptance):
@@ -571,7 +586,7 @@ class CodexAcceptanceEvidenceValidator:
     def evaluate(self, cycle_id: str, job: JobProposal,
                  outcome: ExecutionOutcome) -> AcceptanceEvaluation:
         receipts = [item for item in outcome.evidence
-                    if item.get("kind") == "codex_process_receipt"]
+                    if item.get("kind") in {"codex_process_receipt", "agent_process_receipt"}]
         if (outcome.status != "succeeded" or len(receipts) != 1
                 or receipts[0].get("process_status") != "process_succeeded"
                 or receipts[0].get("exit_code") != 0
@@ -610,3 +625,8 @@ class CodexAcceptanceEvidenceValidator:
             "work_status": "approved" if passed else "not_approved",
             "verification_source": type(self.acceptance_verifier).__name__,
         },))
+
+
+# Compatibility names for existing integrations and historical tests.
+CodexAuthorizedJobExecutor = AuthorizedJobExecutor
+CodexAcceptanceEvidenceValidator = AgentAcceptanceEvidenceValidator

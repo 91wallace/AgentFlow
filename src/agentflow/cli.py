@@ -1,4 +1,4 @@
-"""User-facing CLI; no agent execution commands exist in phases 1 or 2."""
+"""Local initialization, planning and explicit task execution CLI."""
 
 import argparse
 from dataclasses import asdict
@@ -10,8 +10,10 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .config import ConfigError, load_config
-from .security import SecurityProfile, profile_diagnostic, save_profile_configuration
+from .config import AGENTS, AgentChoice, Config, ConfigError, load_config, resolve_agent
+from .agents.factory import create_adapter
+from .execution_selection import read_selection, persist_selection
+from .security import SecurityProfile
 from .environment.doctor import diagnose
 from .init import InitError, initialize, repository_root
 from .planning import PlanError, load_plan
@@ -37,6 +39,7 @@ from .validation import (DockerRuntime, LocalProcessRuntime, RuntimeLimits,
                          StructuredGateValidatorFactory,
                          cleanup_validation_storage)
 from .planning import canonical
+from .planning.prompts import next_task_prompt, task_instruction
 from .planning.loader import command_data, gate_data
 
 
@@ -45,7 +48,7 @@ class _NeverCancel:
         return False
 
 
-def _apl_acceptance_policy_digest(plan) -> str:
+def _apl_acceptance_policy_digest(plan, choice=None) -> str:
     value = {
         "spec_digest": plan.spec_digest,
         "tasks_digest": plan.tasks_digest,
@@ -56,7 +59,42 @@ def _apl_acceptance_policy_digest(plan) -> str:
         "validation_commands": [command_data(command)
                                 for command in plan.specification.validation_commands],
     }
+    if choice is not None:
+        value["executor_selection"] = {"agent": choice.agent, "provider": choice.provider, "model": choice.model}
     return "sha256:" + hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+
+
+def _agent_arguments(command, *, init=False):
+    command.add_argument("--agent", choices=AGENTS)
+    command.add_argument("--invoker-agent", choices=AGENTS, help="identidade informada pela integração chamadora")
+    if not init:
+        command.add_argument("--idle-seconds", type=_idle_value, default=300,
+                             help="timeout sem saída; padrão 300s; 0 desativa")
+        command.add_argument("--provider")
+        command.add_argument("--model")
+
+
+def _idle_value(value):
+    value = int(value)
+    if value < 0:
+        raise argparse.ArgumentTypeError("idle-seconds deve ser >= 0")
+    return value
+
+
+def _configured_runtime(path, args):
+    idle = getattr(args, "idle_seconds", 300)
+    return LocalRuntime(path) if idle == 300 else LocalRuntime(path, default_idle_seconds=idle or None)
+
+
+def _selected_agent(args, root):
+    path = root / ".agentflow" / "config.toml"
+    config = load_config(path) if path.is_file() else Config()
+    return resolve_agent(config, agent=args.agent, invoker=args.invoker_agent,
+                         provider=args.provider, model=args.model)
+
+
+def _adapter_for_choice(choice):
+    return CodexAdapter() if choice.agent == "codex" and not choice.model else create_adapter(choice)
 
 
 def _validate_apl_acceptance_readiness(plan, snapshot) -> None:
@@ -77,6 +115,27 @@ def _validate_apl_acceptance_readiness(plan, snapshot) -> None:
 
 def _generated_plan_digest(plan) -> str:
     return f"spec:{plan.spec_digest};tasks:{plan.tasks_digest}"
+
+
+def _completed_milestone_run(root: Path, run_id: str, objective: str) -> bool:
+    import sqlite3
+    from .apl import SQLiteAuthorizedExecutionStore, SQLiteCycleStore
+    state_path = root / ".agentflow" / "state.sqlite3"
+    if not state_path.is_file():
+        return False
+    try:
+        run = SQLiteAuthorizedExecutionStore(str(state_path), initialize=False).load(run_id)
+        cycle = SQLiteCycleStore(state_path, initialize=False).load(run["cycle_id"])
+        binding = json.loads(run["binding_json"])
+        return (run["status"] == "completed" and bool(run["tasks"])
+                and all(task["status"] == "completed" for task in run["tasks"])
+                and cycle.state.value == "COMPLETED"
+                and cycle.objective == objective
+                and Path(binding["workspace_path"]).resolve(strict=True) == root.resolve(strict=True)
+                and binding["plan_revision_id"] == cycle.plan_revision_id
+                and canonical([asdict(job) for job in cycle.jobs]) == run["plan_json"])
+    except (KeyError, ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+        raise StateError(f"não foi possível validar saída do marco: {exc}") from exc
 
 
 def _write_objective_cycle_manifest(root: Path, cycle_id: str, plan_directory: Path,
@@ -125,7 +184,7 @@ def _objective_plan_directory(root: Path, cycle_id: str, fallback: Path) -> Path
     if record.get("schema_version") != 1 or record.get("cycle_id") != cycle_id:
         raise StateError("objective_run_manifest_invalid_preserved")
     directory = Path(record.get("plan_directory", "")).resolve(strict=True)
-    control = (root / ".agentflow").resolve(strict=True)
+    control = root.resolve(strict=True)
     if directory != control and control not in directory.parents:
         raise StateError("objective_run_plan_directory_outside_agentflow_state")
     return directory
@@ -138,6 +197,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("init", "doctor", "plan", "state", "audit", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup", "approval-preview"):
         command = commands.add_parser(name)
         command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
+        if name == "init":
+            _agent_arguments(command, init=True)
+        if name == "execute":
+            _agent_arguments(command)
         if name == "approval-preview":
             command.add_argument("--broker-db", type=Path, required=True,
                                  help="SQLite do Broker, aberto somente para leitura")
@@ -178,23 +241,28 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--expected-revision", type=int, required=True)
     objective_run = commands.add_parser(
         "run", help="planejar e executar um objetivo no workspace local")
-    objective_run.add_argument("objective", help="objetivo solicitado pelo operador")
+    objective_run.add_argument("objective", nargs="?", help="objetivo; omitido: lê TASKS.json")
+    objective_run.add_argument("--tasks-file", type=Path,
+                               help="backlog JSON; relativo à raiz do projeto")
+    objective_run.add_argument("--plan-dir", type=Path, help="plano TOML pronto; dispensa planejador")
+    _agent_arguments(objective_run)
     objective_run.add_argument("--path", type=Path, default=Path.cwd(), help="workspace do projeto")
     objective_run.add_argument("--allow-unconfined-network", action="store_true",
-                               help="registra explicitamente que a validação local pode usar rede")
+                               help=argparse.SUPPRESS)
     objective_run.add_argument("--max-seconds", type=float, default=3600)
     objective_run.add_argument("--max-estimated-cost", type=float, default=0.10,
                                help="estimativa operacional, não teto financeiro do provider")
     objective_run.add_argument("--max-attempts-per-job", type=int, default=3)
     objective_run.add_argument("--task-timeout", type=int, default=1800)
     objective_run.add_argument("--planner-timeout", type=int, default=240)
+    objective_run.add_argument("--planner-max-plan-reads", type=int, default=8)
     objective_run.add_argument("--operation-id", default="",
                                help="chave explícita para iniciar uma nova execução; sem ela o pedido idêntico é idempotente")
-    profile = commands.add_parser("profile", help="configurar ou diagnosticar o perfil de segurança")
+    profile = commands.add_parser("profile", help="compatibilidade: perfil local não é mais necessário")
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
-    profile_status = profile_commands.add_parser("status", help="mostrar perfil e capacidades indisponíveis")
+    profile_status = profile_commands.add_parser("status", help="informar que perfil e autenticação não são requeridos")
     profile_status.add_argument("--path", type=Path, default=Path.cwd())
-    profile_select = profile_commands.add_parser("select", help="registrar seleção explícita, sem habilitar grants")
+    profile_select = profile_commands.add_parser("select", help="compatibilidade: não grava perfil nem habilita execução")
     profile_select.add_argument("--path", type=Path, default=Path.cwd())
     profile_select.add_argument("--profile", required=True,
                                 choices=tuple(item.value for item in SecurityProfile))
@@ -210,10 +278,10 @@ def main(argv: list[str] | None = None) -> int:
     codex_skill_install.add_argument("--update", action="store_true",
                                      help="atualizar somente uma Skill AgentFlow gerenciada e inalterada")
     webauthn_enroll = commands.add_parser(
-        "webauthn-enroll", help="cadastrar interativamente credencial Windows platform (não concede autorização)")
+        "webauthn-enroll", help="removido: use run sem autenticação AgentFlow")
     webauthn_enroll.add_argument("--broker-db", type=Path, required=True,
                                  help="SQLite Broker local explícito para armazenar a chave pública")
-    local_auth = commands.add_parser("local-auth", help="credencial do operador LOCAL_SUPERVISED")
+    local_auth = commands.add_parser("local-auth", help="removido: use run sem autenticação AgentFlow")
     local_auth_commands = local_auth.add_subparsers(dest="local_auth_command", required=True)
     local_auth_status = local_auth_commands.add_parser("status", help="diagnóstico local sem autenticar")
     local_auth_status.add_argument("--path", type=Path, default=Path.cwd())
@@ -280,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
             apl_command.add_argument("--financial-budget-mode", required=True,
                                      choices=("hard_cap_required", "estimated_cost_accepted"))
         if apl_name == "run":
+            _agent_arguments(apl_command)
             apl_command.add_argument("--cycle-id", required=True)
             apl_command.add_argument("--operation-id", required=True,
                                      help="idempotency key for this explicit operator start")
@@ -296,6 +365,9 @@ def main(argv: list[str] | None = None) -> int:
         if apl_name in {"run-status", "run-cancel", "run-resume"}:
             apl_command.add_argument("--run-id", required=True)
         if apl_name == "run-resume":
+            apl_command.add_argument("--idle-seconds", type=_idle_value, default=300)
+            apl_command.add_argument("--invoker-agent", choices=AGENTS,
+                                     help="identidade chamadora; não altera executor persistido")
             apl_command.add_argument("--plan-dir", type=Path, default=None,
                                      help=argparse.SUPPRESS)
         if apl_name == "handoff":
@@ -312,8 +384,36 @@ def main(argv: list[str] | None = None) -> int:
             if os.environ.get("AGENTFLOW_MANAGED_EXECUTION") == "1":
                 raise StateError("nested_agentflow_orchestration_blocked")
             root = repository_root(args.path.resolve())
-            if not args.allow_unconfined_network:
-                raise StateError("network_scope_requires_explicit_--allow-unconfined-network; local pytest validation cannot enforce network isolation")
+            if args.plan_dir is not None and (args.objective is not None or args.tasks_file is not None):
+                raise StateError("--plan-dir não aceita objetivo ou --tasks-file")
+            if args.plan_dir is not None and not (root / args.plan_dir).resolve().is_relative_to(root):
+                raise StateError("--plan-dir deve pertencer ao projeto")
+            ready_plan = load_plan((root / args.plan_dir).resolve()) if args.plan_dir is not None else None
+            if ready_plan is not None:
+                args.objective = ready_plan.specification.objective
+            if args.objective is not None and args.tasks_file is not None:
+                raise StateError("informe objetivo ou --tasks-file, não ambos")
+            task_source = None
+            master_plan = ""
+            master_reference = None
+            if args.objective is None:
+                from .planning.task_source import read_task_source, task_source_objective
+                source = args.tasks_file or Path("TASKS.json")
+                task_source = read_task_source(source if source.is_absolute() else root / source)
+                if isinstance(task_source, dict) and any(
+                        isinstance(task, dict) and "type" in task for task in task_source["tasks"]):
+                    from .planning.task_queue import prepare_active_milestone
+                    active = prepare_active_milestone(
+                        root, task_source,
+                        lambda run_id, objective: _completed_milestone_run(root, run_id, objective))
+                    task_source, master_plan = active.source, active.master_plan
+                    master_reference = active.reference
+                args.objective = task_source_objective(task_source)
+            initialize(root)
+            config = load_config(root / ".agentflow" / "config.toml")
+            choice = _selected_agent(args, root)
+            if config.runtime != "local":
+                raise StateError("run requer runtime local; configuração docker preservada")
             if (args.max_seconds <= 0 or args.max_estimated_cost <= 0
                     or args.max_attempts_per_job < 1 or not 1 <= args.task_timeout <= 7200
                     or not 1 <= args.planner_timeout <= 900):
@@ -323,15 +423,27 @@ def main(argv: list[str] | None = None) -> int:
             from .apl import SQLiteCycleStore, SupervisedCycleService
             from .apl import SQLiteAuthorizedExecutionStore
             state_path = root / ".agentflow" / "state.sqlite3"
-            planner = CodexCLIPlannerAdapter(
+            planner_options = ({"agent_adapter": _adapter_for_choice(choice)}
+                               if ready_plan is None and (choice.agent != "codex" or choice.model) else {})
+            planner = None if ready_plan is not None else CodexCLIPlannerAdapter(
                 state_path, enabled=True, timeout_seconds=args.planner_timeout,
-                max_input_bytes=65536, max_output_bytes=65536)
+                max_input_bytes=None, max_output_bytes=65536, idle_seconds=args.idle_seconds or None,
+                max_plan_reads=args.planner_max_plan_reads, **planner_options)
+            if task_source is not None:
+                from .planning.task_source import TaskSourcePlanner
+                planner = TaskSourcePlanner(task_source, planner)
+                planner.master_plan = master_plan
+                planner.master_reference = master_reference
             workspace_identity = str(root.resolve(strict=True))
             objective_digest = hashlib.sha256(args.objective.encode("utf-8")).hexdigest()
             request_id = hashlib.sha256(
                 f"{workspace_identity}\0{objective_digest}".encode()).hexdigest()[:32]
-            plan, plan_directory, _ = prepare_objective_plan(
-                root, args.objective, request_id, planner)
+            if ready_plan is not None:
+                plan, plan_directory = ready_plan, (root / args.plan_dir).resolve()
+            else:
+                plan, plan_directory, _ = prepare_objective_plan(root, args.objective, request_id, planner)
+            if master_reference is not None:
+                master_reference.verify()
             if not plan.tasks or any(not task.gates or not task.acceptance_criteria
                                      or not task.versioned_paths for task in plan.tasks):
                 raise StateError("objective_run_requires_tasks_scopes_and_independent_acceptance_gates")
@@ -341,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
             scope = tuple(sorted({path for task in plan.tasks for path in task.versioned_paths}))
             scope += ("network:unconfined",)
             request_hash = hashlib.sha256(
-                f"{workspace_identity}\0{args.objective}\0{plan.spec_digest}\0{plan.tasks_digest}".encode()
+                f"{workspace_identity}\0{args.objective}\0{plan.spec_digest}\0{plan.tasks_digest}\0{choice.agent}:{choice.provider}:{choice.model}".encode()
             ).hexdigest()
             operation_id = args.operation_id or "objective-run-" + request_hash[:32]
             cycle_id = hashlib.sha256(f"cycle:{operation_id}".encode()).hexdigest()[:32]
@@ -368,17 +480,23 @@ def main(argv: list[str] | None = None) -> int:
             except KeyError:
                 cycle = SupervisedCycleService(cycle_store, state_path).start(
                     plan, args.objective, scope, cycle_id=cycle_id)
+            persist_selection(root, cycle.cycle_id, choice)
             print(json.dumps({"event": "cycle_persisted", "cycle_id": cycle.cycle_id,
                               "task_count": len(cycle.jobs), "plan_digest": cycle.plan_digest,
                               "plan_directory": str(plan_directory), "dispatch_started": False},
                              sort_keys=True), flush=True)
             nested_args = ["apl", "run", "--path", str(root), "--cycle-id", cycle.cycle_id,
+                           "--agent", choice.agent,
                            "--plan-dir", str(plan_directory), "--operation-id", operation_id,
                            "--max-jobs", str(len(cycle.jobs)),
                            "--max-attempts-per-job", str(args.max_attempts_per_job),
                            "--max-seconds", str(args.max_seconds),
                            "--max-estimated-cost", str(args.max_estimated_cost),
                            "--validity-seconds", "3600", "--task-timeout", str(args.task_timeout)]
+            if args.idle_seconds != 300:
+                nested_args += ["--idle-seconds", str(args.idle_seconds)]
+            if choice.model:
+                nested_args += ["--provider", choice.provider, "--model", choice.model]
             return main(nested_args)
         if args.command == "codex-skill":
             from .codex_skill import install_codex_skill
@@ -388,18 +506,23 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         if args.command == "init":
-            root, created = initialize(args.path)
+            root, created = initialize(args.path, agent=args.agent or args.invoker_agent)
             print(f"{root}: configuração {'criada' if created else 'existente; sem alterações'}")
+            config = load_config(root / ".agentflow" / "config.toml")
+            print(f"Agente: {config.effective_agent}; runtime: {config.runtime}. Sem perfil ou autenticação AgentFlow.")
+            print("Próximo: agentflow run" if (root / "TASKS.json").is_file()
+                  else 'Próximo: agentflow run "<objetivo>" ou crie TASKS.json e use agentflow run')
             return 0
         if args.command == "profile":
-            root = repository_root(args.path.resolve())
-            profile_path = root / ".agentflow" / "security-profile.toml"
-            if args.profile_command == "select":
-                selected = SecurityProfile(args.profile)
-                save_profile_configuration(profile_path, selected)
-            diagnostic = profile_diagnostic(profile_path)
-            print(json.dumps(diagnostic.to_dict(), ensure_ascii=False, sort_keys=True))
-            return 2 if diagnostic.configuration_status == "invalid_or_missing" else 0
+            print(json.dumps({"profile": None, "configuration_status": "not_required",
+                              "authentication_required": False, "authority_available": False,
+                              "grant_issuance_enabled": False, "dispatch_enabled": False,
+                              "next_command": "agentflow run",
+                              "reason": "local_execution_requires_no_security_profile"}, sort_keys=True))
+            return 0
+        if (args.command in {"local-auth", "webauthn-enroll"}
+                or args.command == "apl" and args.apl_command in {"authorize-plan", "handoff-review"}):
+            raise StateError("autenticação AgentFlow removida do fluxo local; use agentflow run")
         if args.command == "approval-preview":
             from .approval.presentation import PresentationError, render_readonly_preview
             try:
@@ -408,68 +531,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Erro: {exc}", file=sys.stderr)
                 return 2
             return 0
-        if args.command == "webauthn-enroll":
-            from .approval.persistence import BrokerStore
-            from .security.windows_webauthn import (
-                WindowsHelloCredentialEnrollment, WindowsWebAuthnApi, WindowsWebAuthnError,
-            )
-            try:
-                api = WindowsWebAuthnApi()
-                if not api.platform_uv_available():
-                    raise WindowsWebAuthnError("windows_platform_uv_authenticator_unavailable")
-                with BrokerStore(args.broker_db) as broker_store:
-                    record, evidence = WindowsHelloCredentialEnrollment(
-                        broker_store, api).enroll_interactive()
-                print(json.dumps({**evidence, "credential_id": record.credential.credential_id,
-                                  "status": record.status, "dispatch_enabled": False},
-                                 sort_keys=True, ensure_ascii=False))
-                return 0
-            except Exception as exc:
-                print(f"Enrollment indisponível: {exc}", file=sys.stderr)
-                return 2
-        if args.command == "local-auth":
-            from .apl import SQLiteCycleStore
-            from .security import (LocalPassphraseError, SQLiteLocalOperatorCredentialStore,
-                                   current_local_operator_principal,
-                                   enroll_local_operator_interactive,
-                                   revoke_local_operator_interactive)
-            try:
-                root = repository_root(args.path.resolve())
-                state_path = root / ".agentflow" / "state.sqlite3"
-                if not state_path.is_file():
-                    raise LocalPassphraseError("agentflow_state_store_missing")
-                from .security import load_profile_configuration
-                selected_profile = load_profile_configuration(
-                    root / ".agentflow" / "security-profile.toml")
-                if selected_profile.profile is not SecurityProfile.LOCAL_SUPERVISED:
-                    raise LocalPassphraseError("local_supervised_profile_required")
-                principal = current_local_operator_principal()
-                apl_store = SQLiteCycleStore(state_path, initialize=False)
-                credentials = SQLiteLocalOperatorCredentialStore(apl_store)
-                if args.local_auth_command == "status":
-                    active = credentials.active(principal)
-                    print(json.dumps({"profile": "LOCAL_SUPERVISED",
-                                      "principal": principal,
-                                      "credential_enrolled": active is not None,
-                                      "mechanism": "local_passphrase_scrypt",
-                                      "dispatch_enabled": False}, sort_keys=True))
-                    return 0 if active else 2
-                if not sys.stdin.isatty():
-                    raise LocalPassphraseError("interactive_terminal_required")
-                if args.local_auth_command == "enroll":
-                    credential_id = enroll_local_operator_interactive(credentials, principal)
-                else:
-                    revoked = revoke_local_operator_interactive(credentials, principal)
-                    print(json.dumps({"profile": "LOCAL_SUPERVISED", "principal": principal,
-                                      "revoked": revoked, "dispatch_enabled": False}, sort_keys=True))
-                    return 0 if revoked else 2
-                print(json.dumps({"profile": "LOCAL_SUPERVISED", "principal": principal,
-                                  "credential_id": credential_id, "enrolled": True,
-                                  "dispatch_enabled": False}, sort_keys=True))
-                return 0
-            except Exception as exc:
-                print(f"Autenticação local indisponível: {exc}", file=sys.stderr)
-                return 2
         root = repository_root(args.path.resolve())
         if args.command == "apl":
             from .apl import SQLiteCycleStore, SupervisedCycleService
@@ -493,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
                 execution_store = SQLiteAuthorizedExecutionStore(str(state_path))
                 run = execution_store.load(args.run_id)
                 binding = json.loads(run["binding_json"])
+                selected = read_selection(root, run["cycle_id"])
                 if binding.get("authorization_mode") != "local_execution_contract":
                     raise StateError("local_execution_contract_required")
                 if args.apl_command == "run-cancel":
@@ -504,6 +566,10 @@ def main(argv: list[str] | None = None) -> int:
                     return 0 if revoked or execution_store.cancel_requested(args.run_id) else 2
                 print(json.dumps({
                     "run_id": run["run_id"], "cycle_id": run["cycle_id"],
+                    "executor": binding["executor_id"], "executor_version": binding["executor_version"],
+                    "provider": selected.provider if selected else None,
+                    "model": selected.model if selected else None,
+                    "selection_mode": "manual" if selected and selected.model else "cli-default",
                     "status": run["status"], "reason": run["reason"],
                     "jobs_started": run["jobs_started"], "attempts": run["attempts"],
                     "consumed_seconds": run["consumed_seconds"],
@@ -576,12 +642,17 @@ def main(argv: list[str] | None = None) -> int:
                             or args.task_timeout < 1 or args.task_timeout > 7200
                             or len(args.currency) != 3 or not args.currency.isalpha()):
                         raise StateError("local_execution_limits_invalid")
-                policy_digest = _apl_acceptance_policy_digest(plan)
-                adapter = CodexAdapter()
+                stored_choice = read_selection(root, cycle_id)
+                if args.apl_command == "run":
+                    choice = persist_selection(root, cycle_id, _selected_agent(args, root))
+                else:
+                    choice = stored_choice or AgentChoice(binding["executor_id"])
+                policy_digest = _apl_acceptance_policy_digest(plan, choice if read_selection(root, cycle_id) else None)
+                adapter = _adapter_for_choice(choice)
                 availability = adapter.discover()
                 if availability.status != "available" or not availability.version:
                     raise StateError(
-                        f"codex_cli_not_homologated:{availability.reason_code}:no_job_dispatched")
+                        f"executor_unavailable:{choice.agent}:{availability.reason_code}:no_job_dispatched")
                 root_real = root.resolve(strict=True)
                 info = root_real.stat()
                 workspace_identity = "sha256:" + hashlib.sha256(
@@ -599,10 +670,11 @@ def main(argv: list[str] | None = None) -> int:
                     def resolve(self, candidate_cycle_id):
                         if candidate_cycle_id != cycle_id:
                             return ""
-                        return _apl_acceptance_policy_digest(load_plan(plan_directory))
+                        return _apl_acceptance_policy_digest(load_plan(plan_directory), read_selection(root, cycle_id))
 
                 executor = CodexAuthorizedJobExecutor(
-                    adapter=adapter, runtime=LocalRuntime(root / ".agentflow" / "runs"),
+                    adapter=adapter, runtime=_configured_runtime(root / ".agentflow" / "runs", args),
+                    handoff_resolver=lambda candidate: dict(store.load(candidate).outcomes),
                     workspace_resolver=CurrentWorkspaceResolver(),
                     task_timeout_seconds=(task_timeout if args.apl_command == "run"
                                           else min(1800, max(1, int(max_seconds)))))
@@ -613,7 +685,7 @@ def main(argv: list[str] | None = None) -> int:
                 resolver = LocalExecutionContractResolver(
                     contract_store=execution_store, cycle_store=store,
                     workspace_resolver=CurrentWorkspaceResolver(),
-                    executor_id="codex", executor_version=availability.version,
+                    executor_id=choice.agent, executor_version=availability.version,
                     acceptance_policy_resolver=CurrentAcceptancePolicyResolver())
                 controller = AuthorizedExecutionController(
                     cycle_store=store, execution_store=execution_store,
@@ -655,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
                         execution_store.load(args.run_id)["grant_id"])
                 print(json.dumps({
                     "contract_id": contract.contract_id,
+                    "executor": choice.agent, "provider": choice.provider or None, "model": choice.model or None,
+                    "selection_mode": "manual" if choice.model else "cli-default",
                     "run_id": result["run_id"], "cycle_id": cycle_id,
                     "status": result["status"], "reason": result["reason"],
                     "dispatch_enabled": result["status"] in {"ready", "running"},
@@ -702,131 +776,6 @@ def main(argv: list[str] | None = None) -> int:
                 if result["status"] == "awaiting_authorization":
                     print("Aguardando autoridade independente; Broker não autorizou dispatch.")
                 return 0
-            if args.apl_command == "handoff-review":
-                if not sys.stdin.isatty() or not sys.stdout.isatty():
-                    raise StateError("consent_review_requires_interactive_terminal")
-                from .approval.persistence import BrokerStore
-                from .security import (load_local_consent_configuration,
-                                       review_persisted_handoff)
-                from .security import load_profile_configuration
-                profile = load_profile_configuration(root / ".agentflow" / "security-profile.toml")
-                if profile.profile is not SecurityProfile.LOCAL_SUPERVISED:
-                    raise StateError("local_supervised_profile_required_for_consent_review")
-                config = load_local_consent_configuration(
-                    root / ".agentflow" / "local-consent.toml",
-                    project_root=root, state_database=state_path)
-                with BrokerStore(config.broker_database) as broker_store:
-                    outcome = review_persisted_handoff(
-                        cycle_store=store, state_database=state_path,
-                        broker_store=broker_store, config=config,
-                        cycle_id=args.cycle_id, proposal_id=args.proposal_id)
-                    print(json.dumps({
-                        "decision": outcome.decision.value,
-                        "decision_id": outcome.consent_decision_id,
-                        "grant_id": outcome.grant_id,
-                        "state": outcome.state,
-                        "reason": outcome.reason,
-                        "dispatch_enabled": False,
-                    }, ensure_ascii=False, sort_keys=True))
-                return 0 if outcome.state in {
-                    "approved", "rejected", "blocked", "expired", "revoked", "consumed"
-                } else 2
-            if args.apl_command == "authorize-plan":
-                if not sys.stdin.isatty() or not sys.stdout.isatty():
-                    raise StateError("execution_consent_requires_interactive_terminal")
-                from .approval.persistence import BrokerStore
-                from .security import (load_local_consent_configuration,
-                                       load_profile_configuration,
-                                       review_accepted_execution_plan)
-                profile = load_profile_configuration(root / ".agentflow" / "security-profile.toml")
-                if profile.profile is not SecurityProfile.LOCAL_SUPERVISED:
-                    raise StateError("local_supervised_profile_required_for_execution_consent")
-                config = load_local_consent_configuration(
-                    root / ".agentflow" / "local-consent.toml",
-                    project_root=root, state_database=state_path)
-                with BrokerStore(config.broker_database) as broker_store:
-                    outcome = review_accepted_execution_plan(
-                        cycle_store=store, state_database=state_path,
-                        broker_store=broker_store, config=config,
-                        cycle_id=args.cycle_id, executor_id=args.executor_id,
-                        executor_version=args.executor_version,
-                        max_attempts_per_job=args.max_attempts_per_job,
-                        financial_budget_mode=args.financial_budget_mode)
-                    grant_validation = None
-                    if outcome.grant_id is not None and outcome.state == "approved":
-                        from .security import (AuthoritativeConsentResolver,
-                                               SQLiteLocalOperatorCredentialStore,
-                                               current_local_operator_principal)
-                        from .security.authorization import Ed25519LocalGrantVerifier
-                        from .apl.authorized_execution import BrokerExecutionGrantResolver
-                        from .apl.codex_execution import PinnedWorkspace
-                        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-                        principal = current_local_operator_principal()
-                        credentials = SQLiteLocalOperatorCredentialStore(store)
-                        active = credentials.active(principal)
-                        if active is None:
-                            raise StateError("local_operator_credential_missing_after_consent")
-                        key_id = "local-operator-" + active[0].removeprefix("local-credential-")
-                        verifier = Ed25519LocalGrantVerifier({
-                            key_id: Ed25519PublicKey.from_public_bytes(active[2])})
-
-                        class CurrentLocalVerifierResolver:
-                            def resolve(self, candidate_key_id, operator_identity):
-                                return (verifier if candidate_key_id == key_id
-                                        and operator_identity == principal else None)
-
-                        workspace_authority = AuthoritativeConsentResolver(
-                            apl_store=store, broker_store=broker_store,
-                            project_id=config.project_id,
-                            proposer_principal=config.proposer_principal,
-                            authorized_project_ids=config.authorized_project_ids,
-                            operator_identity=principal, limits=config.limits,
-                            workspace_root=config.workspace_root,
-                            consent_ttl_seconds=config.consent_ttl_seconds)
-                        workspace_authority.register_workspace(args.cycle_id)
-                        workspace_path, workspace_identity, workspace_id = (
-                            workspace_authority._validate_workspace_binding(
-                                args.cycle_id, store.load(args.cycle_id).authorized_scope))
-                        pinned = PinnedWorkspace(
-                            Path(workspace_path), config.project_id, workspace_id,
-                            workspace_identity)
-
-                        class CurrentWorkspaceResolver:
-                            def resolve(self, cycle_id):
-                                return pinned if cycle_id == args.cycle_id else None
-
-                        resolver = BrokerExecutionGrantResolver(
-                            broker_store=broker_store, cycle_store=store,
-                            verifier_resolver=CurrentLocalVerifierResolver(),
-                            workspace_resolver=CurrentWorkspaceResolver(),
-                            executor_id=args.executor_id,
-                            executor_version=args.executor_version)
-                        verified = resolver.resolve_and_validate(
-                            outcome.grant_id, args.cycle_id)
-                        grant_validation = {
-                            "signature_and_binding_valid": True,
-                            "expires_at": verified.expires_at,
-                            "plan_digest": verified.approved_plan_digest,
-                            "plan_revision_id": verified.plan_revision_id,
-                            "workspace_identity_digest": verified.workspace_identity_digest,
-                            "allowed_operations": list(verified.allowed_operations),
-                            "max_jobs": verified.limits.max_jobs,
-                            "max_attempts_per_job": verified.limits.max_attempts_per_job,
-                            "max_seconds": verified.limits.max_seconds,
-                            "max_concurrency": verified.limits.max_concurrency,
-                            "financial_budget_mode": verified.budget_policy.mode.value,
-                        }
-                print(json.dumps({
-                    "decision": outcome.decision.value,
-                    "decision_id": outcome.consent_decision_id,
-                    "grant_id": outcome.grant_id,
-                    "state": outcome.state,
-                    "reason": outcome.reason,
-                    "grant_validation": grant_validation,
-                    "dispatch_enabled": False,
-                }, ensure_ascii=False, sort_keys=True))
-                return 0 if outcome.state in {"approved", "rejected", "blocked", "expired", "revoked"} else 2
             if args.apl_command == "replan":
                 if args.planner == "deterministic":
                     if args.enable_experimental_codex:
@@ -874,11 +823,9 @@ def main(argv: list[str] | None = None) -> int:
                 if job is None:
                     print("Nenhum job elegível")
                 else:
-                    print(f"Job proposto: {job.job_id}\n{job.instruction}")
-                    print(f"Escopo: {', '.join(job.required_scope)}")
-                    print(f"Dependências: {', '.join(job.depends_on) or '-'}")
-                    print(f"Critérios: {', '.join(job.acceptance_criteria)}")
-                    print("Nenhuma execução foi iniciada.")
+                    from .planning.handoff import dependency_context
+                    context = dependency_context(job.depends_on, dict(service.store.load(args.cycle_id).outcomes))
+                    print(next_task_prompt(job.job_id, job.instruction, job.required_scope, context))
                 return 0
             if args.apl_command == "submit-result":
                 cycle = service.submit_result(args.cycle_id, args.attempt_id)
@@ -1059,6 +1006,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Logs removidos: {len(removed)}")
                 return 0
         if args.command == "execute":
+            choice = _selected_agent(args, root)
             plan = load_plan(root / ".agentflow")
             task = next((item for item in plan.tasks if item.id == args.task), None)
             if task is None:
@@ -1081,12 +1029,13 @@ def main(argv: list[str] | None = None) -> int:
                     workspace_id = managed.workspace_id
             request = ExecutionRequest(plan.specification.project_id, task.id, 1, definitions[task.id],
                                        args.operation_id, workspace,
-                                       f"{task.title}\n\n{task.description}\n\nAcceptance criteria:\n" +
-                                       "\n".join(f"- {criterion.id}: {criterion.description}" for criterion in task.acceptance_criteria),
+                                       next_task_prompt(task.id, task_instruction(task), task.versioned_paths),
                                        ExecutionPolicy(args.timeout, approval=args.approval),
                                        tuple((criterion.id, criterion.description) for criterion in task.acceptance_criteria),
                                        workspace_id)
-            adapter = CodexAdapter()
+            adapter = _adapter_for_choice(choice)
+            if hasattr(adapter, "prepare_request"):
+                request = adapter.prepare_request(request)
             spec = adapter.prepare(request)  # All capability checks happen before reservation.
             state_path = root / ".agentflow" / "state.sqlite3"
             with ExecutionStore(state_path) as store:
@@ -1100,7 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not attempt.created:
                     print(f"Tentativa existente {attempt.attempt_id}: {attempt.status}; nenhum processo reiniciado.")
                     return 0 if attempt.status == "process_succeeded" else 1
-                runtime = LocalRuntime(root / ".agentflow" / "runs")
+                runtime = _configured_runtime(root / ".agentflow" / "runs", args)
                 try:
                     result = runtime.run(spec, attempt.attempt_id, request.policy,
                                          lambda identity: store.started(attempt.attempt_id, identity), _NeverCancel())
@@ -1190,8 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if result.status.value == "passed" else 1
         config = load_config(root / ".agentflow" / "config.toml")
         checks = diagnose(config)
-        profile_info = profile_diagnostic(root / ".agentflow" / "security-profile.toml")
-        print("security_profile: " + json.dumps(profile_info.to_dict(), ensure_ascii=False, sort_keys=True))
+        print("Autenticação AgentFlow: não requerida")
         for check in checks:
             requirement = "obrigatório" if check.required else "opcional"
             print(f"{check.name}: {check.status} ({requirement}) — {check.detail}")

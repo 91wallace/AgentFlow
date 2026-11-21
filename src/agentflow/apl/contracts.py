@@ -50,6 +50,7 @@ class ExecutionOutcome:
     evidence: tuple[dict, ...] = ()
     cost: float = 0
     progress_key: str = ""
+    handoff: dict | None = None
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,39 @@
 # Plano de implementação
 
+Fatia autorizada: [ADR 0016](decisions/0016-progressive-master-plan-and-responsive-stdin.md),
+Plano Mestre sem teto de tamanho, hash streaming, plan_sections/índice paginado,
+recuperação por linhas no planejador sintético e stdin assíncrono com idle de
+300s configurável. Limites de contexto não rejeitam nem truncam o documento.
+
+Correção de seleção: [ADR 0015](decisions/0015-native-cli-model-defaults.md).
+Perfis provider/modelo deixam de ser obrigatórios; planejamento e execução
+aceitam o padrão nativo do CLI e registram esse modo, distinto de seleção manual.
+
+Fatia de seleção autorizada: [ADR 0014](decisions/0014-invoker-agent-selection.md),
+config v2 compatível com v1, identidade explícita da integração, composição dos
+quatro adaptadores, planejamento selecionado/plano pronto e retomada vinculada
+ao executor persistido. Homologação real permanece separada dos testes sintéticos.
+
+Extensão de continuidade: [ADR 0013](decisions/0013-dependency-handoffs.md),
+handoff JSON minificado persistido no outcome, dependências diretas no prompt,
+sem tetos artificiais de tamanho de JSON e sem substituir gates independentes.
+
+## Fatia autorizada em 2026-11-20 — entrada local simplificada
+
+Conforme [ADR 0011](decisions/0011-local-default-agent-and-backlog.md): Codex
+padrão no `init`, compatibilidade não destrutiva com `none`, retirada dos
+pré-requisitos de perfil/autenticação local, leitura automática de `TASKS.json`
+no `run` sem objetivo e prompts concisos de uma tarefa por vez. CLI antiga de
+enrollment/consentimento local fica inativa com diagnóstico de migração.
+Contratos, limites, evidências e recuperação existentes permanecem. Validação
+usa pytest e executores simulados; não homologa inferência real nem executa o
+backlog do usuário. O roadmap abaixo fica sujeito à supersessão dessa ADR.
+
+Extensão autorizada: [ADR 0012](decisions/0012-master-plan-and-milestone-queue.md)
+acrescenta Plano Mestre `.md` e fila `milestone`/`work`, com goal/acceptance,
+decomposição apenas do marco ativo e verificação de pré-requisitos em SQLite.
+Não gera Markdown, não detalha marcos futuros nem avança automaticamente.
+
 ## Resumo e regras de fase
 
 Fase 1 estabelece um pacote `agentflow` instalável, comandos seguros `--version`, `init` e `doctor`, configuração TOML, testes pytest, CI e instruções de instalação. O protótipo `autonomous-development-runner/` permanece intacto. Nenhuma tarefa desta fase inicia agentes, cria contêineres, grava SQLite ou faz commits. Cada tarefa abaixo deve ser concluída e verificada antes das dependentes.

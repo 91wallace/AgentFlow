@@ -44,7 +44,7 @@ class ClaudeCodeAdapter:
 
     def prepare(self, request: ExecutionRequest) -> ProcessSpec:
         selection = request.model_selection
-        if (selection is None or selection.mode != "manual"
+        if selection is not None and (selection.mode != "manual"
                 or selection.agent_id != self.adapter_id or selection.provider_id != "anthropic"):
             raise ExecutionError("Claude Code exige seleção manual de provider/modelo")
         if request.policy.approval == "on-request":
@@ -59,26 +59,27 @@ class ClaudeCodeAdapter:
         if version_tuple < _MIN_VERSION:
             raise ExecutionError("Claude Code anterior às capabilities headless exigidas")
         version = ".".join(match.groups())
-        try:
-            auth = json.loads(self._probe("auth", "status", "--json"))
-        except ValueError as exc:
-            raise ExecutionError("estado de autenticação Claude Code não estruturado") from exc
-        auth_method = auth.get("authMethod") if isinstance(auth, dict) else None
-        if auth_method not in {"claude.ai", "oauth_token", "api_key", "api_key_helper"}:
-            raise ExecutionError("provider Anthropic não confirmado pelo estado de autenticação")
+        if selection is not None:
+            try:
+                auth = json.loads(self._probe("auth", "status", "--json"))
+            except ValueError as exc:
+                raise ExecutionError("estado de autenticação Claude Code não estruturado") from exc
+            auth_method = auth.get("authMethod") if isinstance(auth, dict) else None
+            if auth_method not in {"claude.ai", "oauth_token", "api_key", "api_key_helper"}:
+                raise ExecutionError("provider Anthropic não confirmado pelo estado de autenticação")
         # These are session-only controls: no config file is modified. Approval prompts
         # are denied rather than left waiting for a human in headless mode.
         args = ("-p", "--input-format", "text", "--output-format", "stream-json",
-                "--verbose", "--model", selection.model_id,
+                "--verbose", *(("--model", selection.model_id) if selection else ()),
                 "--permission-prompts", "none", "--no-session-persistence",
                 "--disable-slash-commands")
         return ProcessSpec(
             self.executable, args, request.workspace.resolve(), request.instruction,
             (), self.adapter_id, version, "unknown", "no-interactive-prompts",
-            ("headless", "stream-json", "manual-model", "model-reported-in-init",
+            ("headless", "stream-json", "manual-model" if selection else "native-default-model", "model-reported-in-init",
              "permission-prompts-denied", "native-sandbox-config-unmodified",
-             "provider-anthropic-auth-confirmed"), self.api_version,
-            "anthropic", selection.model_id)
+             "provider-anthropic-auth-confirmed" if selection else "native-default-provider"), self.api_version,
+            "anthropic" if selection else "", selection.model_id if selection else "")
 
     def interpret(self, result: ProcessResult) -> AgentResult:
         if result.status != "process_succeeded":
@@ -96,22 +97,23 @@ class ClaudeCodeAdapter:
             raise ExecutionError("stream Claude Code sem init/result únicos")
         requested_model = dict(result.request_metadata).get("model_id", "")
         effective_model = init[0].get("model")
-        if not isinstance(effective_model, str) or not effective_model:
+        if requested_model and (not isinstance(effective_model, str) or not effective_model):
             return AgentResult("process_succeeded", "modelo efetivo desconhecido",
                                selection_status="unknown")
-        if effective_model != requested_model:
+        if requested_model and effective_model != requested_model:
             return AgentResult("process_succeeded", "modelo efetivo diverge da seleção",
-                               effective_provider_id="anthropic", effective_model_id=effective_model,
+                               effective_provider_id="anthropic" if requested_model else "unknown", effective_model_id=effective_model,
                                selection_status="mismatch")
+        effective_model = effective_model if isinstance(effective_model, str) and effective_model else "unknown"
         final = terminal[0]
         if final.get("is_error") is True or final.get("subtype") not in (None, "success"):
             return AgentResult("process_failed", f"resultado Claude Code: {final.get('subtype', 'error')}",
-                               effective_provider_id="anthropic", effective_model_id=effective_model,
-                               selection_status="confirmed")
+                               effective_provider_id="anthropic" if requested_model else "unknown", effective_model_id=effective_model,
+                               selection_status="confirmed" if requested_model else "unknown")
         retry_events = sum(event.get("type") == "system" and event.get("subtype") == "api_retry"
                            for event in events)
         denials = final.get("permission_denials", [])
         summary = "permission_denied" if denials else f"result.success; provider_api_retries={retry_events}"
         return AgentResult("process_succeeded", summary,
-                           effective_provider_id="anthropic", effective_model_id=effective_model,
-                           selection_status="confirmed")
+                           effective_provider_id="anthropic" if requested_model else "unknown", effective_model_id=effective_model,
+                           selection_status="confirmed" if requested_model else "unknown")

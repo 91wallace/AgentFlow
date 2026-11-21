@@ -36,8 +36,9 @@ class Adapter:
 
 
 class Runtime:
-    def __init__(self, logs: Path, *, status="process_succeeded"):
+    def __init__(self, logs: Path, *, status="process_succeeded", handoff=None):
         self.logs, self.status = logs, status
+        self.handoff = handoff
         self.calls = []
 
     def run(self, spec, attempt_id, policy, on_started, cancel, before_spawn=None):
@@ -48,7 +49,9 @@ class Runtime:
         out = self.logs / f"{attempt_id}.out"
         err = self.logs / f"{attempt_id}.err"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text('{"type":"turn.completed"}\n', encoding="utf-8")
+        message = (json.dumps({"type": "item.completed", "item": {"type": "agent_message",
+                   "text": json.dumps(self.handoff)}}) + "\n") if self.handoff is not None else ""
+        out.write_text(message + '{"type":"turn.completed"}\n', encoding="utf-8")
         err.write_text("", encoding="utf-8")
         return ProcessResult(self.status, 0 if self.status == "process_succeeded" else 1,
                              out, err, "sha256:" + "a" * 64, "sha256:" + "b" * 64,
@@ -112,7 +115,8 @@ def test_authorized_controller_uses_existing_codex_adapter_runtime_and_persists_
         task_limits_by_job=(("create-note", TaskExecutionLimits(1, 120, 1)),),
         budget_policy=FinancialBudgetPolicy(FinancialBudgetMode.ESTIMATED_COST_ACCEPTED, 1, "USD"),
     )
-    adapter, runtime = Adapter(), Runtime(tmp_path / "logs")
+    from test_handoff import handoff
+    adapter, runtime = Adapter(), Runtime(tmp_path / "logs", handoff=handoff())
     executor = CodexAuthorizedJobExecutor(
         adapter=adapter, runtime=runtime,
         workspace_resolver=WorkspaceResolver(workspace, grant.workspace_id),
@@ -138,11 +142,16 @@ def test_authorized_controller_uses_existing_codex_adapter_runtime_and_persists_
     assert spec.cwd == workspace.resolve()
     assert spec.effective_sandbox == "unknown"
     assert spec.effective_approval == "never"
+    assert "Tarefa: create-note" in adapter.request.instruction
+    assert "Escopo: workspace" in adapter.request.instruction
+    assert "JSON minificado" in adapter.request.instruction
     assert 1 <= policy.timeout_seconds <= 120
     assert operation_id.startswith("apl-attempt-")
     assert cancellation.is_set() is False
     task = runs.load(result["run_id"])["tasks"][0]
     assert task["status"] == "completed"
+    assert json.loads(task["outcome_json"])["handoff"] == handoff()
+    assert dict(cycles.load(snapshot.cycle_id).outcomes)[job.job_id].handoff == handoff()
     assert task["process_identity_json"]
     assert json.loads(task["outcome_json"])["evidence"][0]["kind"] == "codex_process_receipt"
     assert json.loads(task["outcome_json"])["evidence"][0]["operation_id"].startswith("apl-op-")

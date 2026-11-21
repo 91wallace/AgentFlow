@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 from threading import Event
 from uuid import uuid4
 
@@ -36,12 +37,12 @@ class CodexCLIPlannerAdapter:
 
     def __init__(self, state_path, *, enabled=False, timeout_seconds=240,
                  max_input_bytes=65536, max_output_bytes=65536,
-                 cancel=None, agent_adapter=None, runtime=None):
+                 cancel=None, agent_adapter=None, runtime=None, max_plan_reads=8, idle_seconds=300):
         if enabled is not True:
             raise PlannerUnavailable("Codex planner requires explicit experimental opt-in")
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 900:
             raise ValueError("planner timeout must be between 1 and 900 seconds")
-        if type(max_input_bytes) is not int or not 1024 <= max_input_bytes <= 262144:
+        if max_input_bytes is not None and (type(max_input_bytes) is not int or not 1024 <= max_input_bytes <= 262144):
             raise ValueError("planner input limit must be between 1024 and 262144 bytes")
         if type(max_output_bytes) is not int or not 1024 <= max_output_bytes <= 262144:
             raise ValueError("planner output limit must be between 1024 and 262144 bytes")
@@ -58,15 +59,18 @@ class CodexCLIPlannerAdapter:
             agent_adapter = CodexAdapter()
         if runtime is None:
             from agentflow.runtime.local import LocalRuntime
-            runtime = LocalRuntime(self.state_path.parent / "runs" / "apl-planner")
+            runtime = LocalRuntime(self.state_path.parent / "runs" / "apl-planner", default_idle_seconds=idle_seconds)
         self.agent_adapter = agent_adapter
         self.runtime = runtime
+        if type(max_plan_reads) is not int or max_plan_reads < 1:
+            raise ValueError("max_plan_reads must be positive")
+        self.max_plan_reads = max_plan_reads
 
     def _invoke_structured(self, prompt: str, task: str) -> str:
         if self.cancel.is_set():
             raise InterruptedError("planner cancelled before launch")
         encoded = prompt.encode("utf-8")
-        if len(encoded) > self.max_input_bytes:
+        if self.max_input_bytes is not None and len(encoded) > self.max_input_bytes:
             raise ValueError("semantic planner input exceeds configured byte limit")
         context_digest = sha256(encoded).hexdigest()
         with tempfile.TemporaryDirectory(prefix="agentflow-apl-planner-") as workdir:
@@ -87,15 +91,18 @@ class CodexCLIPlannerAdapter:
                                                       approval="never"),
                                       lambda identity: None, self.cancel)
             if result.status == "timed_out":
-                raise TimeoutError("semantic planner timed out")
+                raise TimeoutError(f"semantic planner timed out: {result.reason}")
             if result.status == "cancelled":
                 raise InterruptedError("semantic planner cancelled")
             if result.status != "process_succeeded":
                 raise PlannerUnavailable(f"Codex planner process failed: {result.status}")
             if result.stdout_bytes > self.max_output_bytes:
                 raise ValueError("semantic planner output exceeded configured byte limit")
-            self.agent_adapter.interpret(result)
-            output = self._message_text(result.stdout_path)
+            interpreted = self.agent_adapter.interpret(result)
+            if interpreted.process_status != "process_succeeded":
+                raise PlannerUnavailable("planner reported failure")
+            reader = getattr(self.agent_adapter, "message_text", self._message_text)
+            output = reader(result.stdout_path)
             if len(output.encode("utf-8")) > self.max_output_bytes:
                 raise ValueError("semantic planner response exceeds configured byte limit")
             if self.cancel.is_set():
@@ -129,6 +136,10 @@ class CodexCLIPlannerAdapter:
             "use only relative paths and the checks exists, nonempty, json, or contains. These checks will be "
             "performed independently against the validation snapshot. Do not treat executor statements as evidence. "
             "Use a DAG with no cycles.\n"
+            "When the objective contains typed work tasks, keep each source id, goal (as description), "
+            "acceptance descriptions (as acceptance_criteria), and depends_on unchanged. Do not execute "
+            "or decompose milestone nodes. Use master_plan_context (or legacy master_plan_markdown) for architecture and invariants only; "
+            "generate no work outside the active milestone.\n"
             "Exact schema: {schema_version:1,title:string,rationale:string,completion_condition:string,tasks:["
             "{id:string,title:string,description:string,depends_on:string[],paths:string[],"
             "acceptance_criteria:[{id:string,description:string}],artifact_checks:[{criterion_id:string,"
@@ -136,8 +147,52 @@ class CodexCLIPlannerAdapter:
             "Max 12 tasks, 32 paths per "
             "task, 8 criteria per task.\nUntrusted planning context JSON:\n" + payload
         )
-        return validate_initial_plan(self._decode_json(
-            self._invoke_structured(prompt, "initial-plan")), context)
+        reference = getattr(context, "master_reference", None)
+        if reference is None:
+            return validate_initial_plan(self._decode_json(self._invoke_structured(prompt, "initial-plan")), context)
+        prompt += (
+            '\nProgressive master-plan access is available ONLY through JSON responses to AgentFlow. '
+            'Do not use CLI tools or open repository files. When more architecture context is needed, '
+            'instead of a plan return exactly {"plan_read":{"sha256":"<master digest>",'
+            '"start_line":1,"end_line":20}} or {"plan_index":{"sha256":"<master digest>","cursor":0}}. '
+            'Ranges are inclusive. If a range exceeds the context budget, request fewer lines. '
+            'Use next_cursor to expand the index. Each response is checked against the same source digest. '
+            'Once enough context is available, return the final plan schema. Never assume missing content.'
+        )
+        supplemental = ""
+        original_timeout = self.timeout_seconds
+        deadline = time.monotonic() + original_timeout
+        try:
+            for step in range(self.max_plan_reads + 1):
+                reference.verify()
+                remaining = int(deadline - time.monotonic())
+                if remaining < 1:
+                    raise TimeoutError("master-plan retrieval exceeded planner deadline")
+                self.timeout_seconds = remaining
+                value = self._decode_json(self._invoke_structured(prompt + supplemental, "initial-plan"))
+                reference.verify()
+                request_type = next((key for key in ("plan_read", "plan_index") if key in value), None)
+                if request_type is None:
+                    return validate_initial_plan(value, context)
+                if step == self.max_plan_reads:
+                    raise PlannerUnavailable("master-plan retrieval round limit; refine plan_sections or budget")
+                request = value[request_type]
+                if (set(value) != {request_type} or not isinstance(request, dict)
+                        or request.get("sha256") != reference.sha256):
+                    raise ValueError("master-plan retrieval digest/schema mismatch")
+                if request_type == "plan_read":
+                    if set(request) != {"sha256", "start_line", "end_line"}:
+                        raise ValueError("invalid master-plan read request")
+                    response = reference.read_lines(request["start_line"], request["end_line"])
+                else:
+                    if set(request) != {"sha256", "cursor"}:
+                        raise ValueError("invalid master-plan index request")
+                    response = reference.index_page(request["cursor"])
+                # Replace previous retrieval context; don't accumulate an unbounded transcript.
+                supplemental = "\nRetrieved master-plan data (previous retrieval replaced):\n" + json.dumps(
+                    response, ensure_ascii=False, separators=(",", ":"))
+        finally:
+            self.timeout_seconds = original_timeout
 
     @staticmethod
     def _context_mapping(context):
