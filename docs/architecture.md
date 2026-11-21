@@ -1,5 +1,38 @@
 # Arquitetura do AgentFlow
 
+## Contratos de execução e ausência de ciclos — M2.3
+
+A [ADR 0021](decisions/0021-apl-security-contract-boundary.md) remove o último
+ciclo entre pacotes. APL consome tipos de grants de `approval.contracts`, sem
+importar security. Limites e orçamento ficam em `apl.execution_contracts`, com
+aliases históricos e acesso pela fachada APL sem carregar stores. As regras do
+auditor permanecem; o baseline passa de 17 para 10 exceções com um remapeamento
+explícito de duas arestas de security para uma de contratos puros de approval.
+Não há ciclos, mas as demais dívidas de dependência continuam registradas.
+
+A [ADR 0022](decisions/0022-readonly-broker-wal-identity-probe.md) documenta a
+correção de uma falha anterior de recuperação: a sondagem de identidade do Broker
+usa cópia privada de DB/WAL somente em `SQLITE_IOERR_TRUNCATE`, preservando a
+recusa de bancos estrangeiros antes do lock e a revalidação na conexão real.
+
+## Contratos de consentimento e grants — M2.2
+
+A [ADR 0020](decisions/0020-approval-security-contract-boundary.md) extrai os
+contratos puros para `approval.consent_contracts` e `approval.local_grants`.
+Security reexporta os tipos antigos, e a persistência passa a consumir contratos
+de approval. Não há import de security/APL em approval. O ciclo restante envolve
+somente APL/security; o baseline cai de 26 para 17 exceções. Bytes de JSON,
+hashes e transações permanecem. O store avançado ainda requer cryptography.
+
+## Fronteira de persistência da validação — M2.1
+
+A [ADR 0019](decisions/0019-state-validation-contract-boundary.md) remove o
+ciclo `state/validation`: erros compartilhados ficam em `contracts.state_errors`,
+e o scheduler depende de `validation.contracts.ValidationStore`. Imports antigos
+dos erros, da reserva e do store permanecem compatíveis. Não há import reverso
+para `state`, inclusive para tipagem. SQL de quota e transações permanecem como
+antes; sua extração é trabalho posterior. O baseline cai de 28 para 26 exceções.
+
 ## Fronteira local vigente — M1
 
 A [ADR 0018](decisions/0018-lean-facades-local-import-isolation.md) torna as
@@ -587,3 +620,13 @@ Ao parar, a interface mostra pedido, trabalho concluído, falhas/incertezas, est
 ### Limite de AQA
 
 MVP-20.1 implementa a base inicial de tentativas, diagnósticos, retry seguro, limites, journal e escalonamento bloqueante. A interface autenticada para resposta humana, reconciliação operacional e retomada após intervenção ainda faltam. Avaliação adversarial completa, Critic e Quality Gates ficam para depois da homologação de execução real. AQA não é executor ou autoridade de consentimento; critérios e evidências devem referir-se ao snapshot exato, e `FAIL`/`INCONCLUSIVE`/`not_run` bloqueiam integração ou conclusão conforme policy.
+# Estado M3.1 — identidade APL
+
+`agentflow.apl.execution_identity` concentra JSON canônico, SHA-256, digest do
+plano local e IDs de operação/tentativa. É módulo puro protegido pelo auditor
+arquitetural; `authorized_execution` preserva aliases privados históricos.
+Esta primeira extração não altera persistência, payloads, hashes, transações ou
+recovery. Escopo e vetores de compatibilidade estão na
+[ADR 0023](decisions/0023-apl-execution-identity.md). A suíte completa passou
+com 815 aprovados e 1 ignorado; as demais fatias M3/M4 continuam pendentes de
+autorização própria.

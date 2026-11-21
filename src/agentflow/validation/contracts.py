@@ -3,8 +3,10 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
+from agentflow.git.contracts import Checkpoint, Workspace
+from agentflow.planning.models import Plan
 from agentflow.planning.models import GateDefinition as GateDefinition
 
 class GateStatus(StrEnum):
@@ -259,3 +261,60 @@ class GateValidator(Protocol):
 
 class ValidationRunner(Protocol):
     def run(self, request: ValidationRequest) -> ValidationResult: ...
+
+
+@dataclass(frozen=True)
+class ValidationReservation:
+    validation_run_id: str
+    operation_id: str
+    status: str
+    request_digest: str
+    created: bool = False
+
+
+class ValidationQueryRows(Protocol):
+    def fetchone(self) -> tuple[Any, ...] | None: ...
+
+
+class ValidationQueryAccess(Protocol):
+    """Existing quota queries; SQL removal is a separate extraction."""
+
+    def execute(self, sql: str, parameters: tuple[Any, ...]) -> ValidationQueryRows: ...
+
+
+class ValidationStore(Protocol):
+    """Persistence operations consumed by the validation scheduler."""
+
+    @property
+    def db(self) -> ValidationQueryAccess: ...
+
+    def begin_validation(self, request: ValidationRequest, workspace: Workspace,
+                         checkpoint: Checkpoint, plan: Plan) -> ValidationReservation: ...
+
+    def validation_result(self, run_id: str) -> ValidationResult: ...
+
+    def record_snapshot(self, run_id: str, snapshot: ValidationSnapshot) -> None: ...
+
+    def prepare_gate_results(self, request: ValidationRequest, gates: tuple[GateDefinition, ...],
+                             validators, validator_version: str = "",
+                             validator_digest: str = "", snapshot_digest: str = "") -> None: ...
+
+    def transition_gate(self, run_id: str, gate_id: str, status: GateStatus, *,
+                        expected: GateStatus, exit_code: int | None = None,
+                        reason: str = "", capabilities_json: str = "[]",
+                        stdout_digest: str = "", stderr_digest: str = "",
+                        stdout_bytes: int = 0, stderr_bytes: int = 0,
+                        truncated: bool = False, process_identity: str = "") -> None: ...
+
+    def record_gate_spawn_intent(self, run_id: str, gate_id: str) -> None: ...
+
+    def record_gate_probe_identity(self, run_id: str, gate_id: str,
+                                   process_identity: str) -> None: ...
+
+    def transition_run(self, run_id: str, status: RunStatus, *, expected: RunStatus,
+                       reason: str = "", unresolved: bool = False) -> None: ...
+
+    def gate_rows(self, run_id: str) -> tuple[tuple, ...]: ...
+
+    def recover_interrupted_validation(self, run_id: str, *, process_stopped: bool | None,
+                                       reason: str) -> str: ...

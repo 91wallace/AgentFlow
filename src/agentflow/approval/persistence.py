@@ -17,7 +17,9 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import sqlite3
+import tempfile
 import threading
 from typing import Iterator
 from uuid import uuid4
@@ -370,7 +372,53 @@ class BrokerStore:
             finally:
                 db.close()
         except sqlite3.DatabaseError as exc:
+            if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_IOERR_TRUNCATE:
+                try:
+                    self._validate_identity_on_copy()
+                except (OSError, sqlite3.DatabaseError) as copy_error:
+                    raise BrokerStoreError("existing database is unreadable and was not modified") from copy_error
+                return
             raise BrokerStoreError("existing database is unreadable and was not modified") from exc
+
+    def _validate_identity_on_copy(self) -> None:
+        """Probe crash-left WAL on private copies, before locking/mutating the source.
+
+        A read-only SQLite connection can fail to truncate ancillary state after
+        an unclean process exit. Recovery of a copy avoids making a foreign DB
+        writable merely to establish its identity. The ordinary identity check
+        on the real connection still runs after the single-instance lock.
+        """
+        sources = (self.path, self.path.with_name(self.path.name + "-wal"))
+
+        def signature(path):
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                return None
+            return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+        before = tuple(signature(path) for path in sources)
+        if before[0] is None:
+            raise BrokerStoreError("existing database disappeared during identity probe")
+        with tempfile.TemporaryDirectory(prefix="agentflow-broker-identity-") as directory:
+            target = Path(directory) / "identity.sqlite"
+            for source, state, destination in zip(
+                    sources, before, (target, target.with_name(target.name + "-wal"))):
+                if state is not None:
+                    shutil.copyfile(source, destination)
+            if tuple(signature(path) for path in sources) != before:
+                raise BrokerStoreError("existing database changed during identity probe")
+            # Deliberately omit SHM: SQLite rebuilds it only in the private directory.
+            db = sqlite3.connect(target, timeout=BUSY_TIMEOUT_MS / 1000)
+            try:
+                app_id = db.execute("PRAGMA application_id").fetchone()[0]
+                tables = db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+                if app_id not in (0, APPLICATION_ID) or (app_id == 0 and tables):
+                    raise BrokerStoreError("refusing to reuse a non-empty database without Broker identity")
+            finally:
+                db.close()
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
@@ -1330,8 +1378,8 @@ class BrokerStore:
 
     def _record_local_consent(self, record, grant=None) -> None:
         """Atomically persist an immutable local consent decision and optional signed grant."""
-        from agentflow.security.authorization import LocalConsentAuditRecord, LocalGrant
-        from agentflow.security.profile import ConsentDecision
+        from .contracts import LocalConsentAuditRecord, LocalGrant
+        from .contracts import ConsentDecision
         if not isinstance(record, LocalConsentAuditRecord):
             raise BrokerStoreError("typed local consent decision required")
         if record.decision is ConsentDecision.APPROVE:
@@ -1354,7 +1402,7 @@ class BrokerStore:
                 "WHERE request_digest=?", (record.request_digest,),
             ).fetchone()
             if prior is not None:
-                from agentflow.security.authorization import LocalConsentAuditRecord
+                from .contracts import LocalConsentAuditRecord
                 existing = LocalConsentAuditRecord.from_json(prior[2])
                 if (existing.decision is not record.decision
                         or existing.operator_identity != record.operator_identity
@@ -1399,7 +1447,7 @@ class BrokerStore:
                 raise BrokerConflict("local consent operation or grant was replayed/conflicted") from exc
 
     def get_local_consent_by_request(self, request_digest: str):
-        from agentflow.security.authorization import LocalConsentAuditRecord
+        from .contracts import LocalConsentAuditRecord
         with self._mutex:
             row = self.db.execute(
                 "SELECT decision_json FROM local_consent_decisions WHERE request_digest=?",
@@ -1415,7 +1463,7 @@ class BrokerStore:
             return record, (grant[0] if grant else None)
 
     def get_local_grant(self, grant_id: str):
-        from agentflow.security.authorization import LocalGrant
+        from .contracts import LocalGrant
         with self._mutex:
             row = self.db.execute(
                 "SELECT g.grant_json,s.status FROM local_authorization_grants g "
@@ -1432,7 +1480,7 @@ class BrokerStore:
     def _transition_local_grant(self, grant_id: str, target: str, reason_code: str,
                                 *, operation_id: str | None = None,
                                 actor_proof_digest: str | None = None) -> str:
-        from agentflow.security.authorization import _digest as _local_digest, _id as _local_id
+        from .contracts import validate_grant_digest as _local_digest, validate_grant_id as _local_id
         _local_id(grant_id, "grant_id")
         if target not in {"revoked", "expired", "consumed"}:
             raise BrokerStoreError("invalid local grant transition")
@@ -2123,7 +2171,7 @@ class BrokerStore:
                             or consent is None or not _is_digest(payload.get("request_digest", ""))
                             or not _is_digest(payload.get("grant_digest", ""))):
                         raise BrokerIntegrityError("invalid local grant issuance event")
-                    from agentflow.security.authorization import LocalConsentAuditRecord
+                    from .contracts import LocalConsentAuditRecord
                     consent_record = LocalConsentAuditRecord.from_json(consent[0])
                     if (consent_record.decision.value != "approve"
                             or consent_record.request_digest != payload["request_digest"]
@@ -2386,7 +2434,7 @@ class BrokerStore:
                         or binding.expires_at != row[3]
                         or projected.get(("webauthn_challenge", row[0])) != (row[4], row[5])):
                     raise BrokerIntegrityError("WebAuthn challenge state diverges from immutable binding/events")
-            from agentflow.security.authorization import LocalConsentAuditRecord, LocalGrant
+            from .contracts import LocalConsentAuditRecord, LocalGrant
             for row in self.db.execute(
                 "SELECT decision_id,operation_id,request_digest,decision_json,record_digest "
                 "FROM local_consent_decisions"

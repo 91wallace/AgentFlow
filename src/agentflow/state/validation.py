@@ -1,6 +1,5 @@
 """SQLite v4 state boundary for validation, build and delivery records."""
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -13,20 +12,12 @@ from agentflow.planning.loader import command_data, gate_data, task_data
 from agentflow.validation.contracts import (GateDefinition, GateResult, GateStatus,
                                             RunStatus, RuntimeCapability,
                                             CapabilityState, ValidationRequest,
-                                            ValidationResult, ValidationSnapshot)
+                                            ValidationResult, ValidationSnapshot,
+                                            ValidationReservation)
 
 from .contracts import ConflictError, TransitionError
 from .git import GitStateStore
 from .sqlite import SQLiteStore, now
-
-
-@dataclass(frozen=True)
-class ValidationReservation:
-    validation_run_id: str
-    operation_id: str
-    status: str
-    request_digest: str
-    created: bool = False
 
 
 class ValidationStateStore(GitStateStore):

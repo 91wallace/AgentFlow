@@ -9,23 +9,18 @@ from pathlib import Path
 import re
 import shutil
 from threading import Event
-from typing import TYPE_CHECKING
 
 from agentflow.git.contracts import Checkpoint, GitProvider, Workspace
 from agentflow.planning import Plan, canonical, digest
 from agentflow.planning.loader import command_data, gate_data
-from agentflow.state.contracts import ConflictError, TransitionError
+from agentflow.contracts.state_errors import ConflictError, TransitionError
 
 from .contracts import (CapabilityState, GateDefinition, GateStatus, GateValidator,
                         RunStatus, RuntimeCapabilities, RuntimeCapability,
                         RuntimeLimits, RuntimeProfile, RuntimeRequest,
                         RuntimeResult, ValidationRequest, ValidationResult,
-                        ValidationRuntime)
+                        ValidationRuntime, ValidationStore)
 from .snapshot import SnapshotError, SnapshotManager
-
-if TYPE_CHECKING:
-    from agentflow.state.validation import ValidationStateStore
-
 
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 LOCAL_REQUIRED = {"argv_only", "timeout", "process_identity", "bounded_output",
@@ -53,7 +48,7 @@ def policy_snapshot(profile: RuntimeProfile, limits: RuntimeLimits | None = None
 class ValidationScheduler:
     """Run only the explicitly selected gates against a verified snapshot."""
 
-    def __init__(self, store: ValidationStateStore, provider: GitProvider,
+    def __init__(self, store: ValidationStore, provider: GitProvider,
                  runtime: ValidationRuntime, validator: GateValidator,
                  snapshot_manager: SnapshotManager, snapshot_parent: Path,
                  output_parent: Path):

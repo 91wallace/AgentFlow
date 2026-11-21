@@ -5,7 +5,8 @@ from .contracts import (BuildStatus, Cancellation, CapabilityState, CommandDefin
                         RunStatus, RuntimeCapabilities, RuntimeCapability,
                         RuntimeLimits, RuntimeProfile, RuntimeRequest,
                         RuntimeResult, ValidationRequest, ValidationResult,
-                        ValidationRunner, ValidationRuntime)
+                        ValidationRunner, ValidationRuntime, ValidationReservation,
+                        ValidationStore)
 from .snapshot import SnapshotError, SnapshotManager
 from .scheduler import ValidationScheduler, policy_snapshot
 from .runtime import LocalProcessRuntime
@@ -20,4 +21,4 @@ __all__ = ["BuildStatus", "Cancellation", "CapabilityState", "CommandDefinition"
            "ValidationRunner", "ValidationRuntime", "SnapshotError", "SnapshotManager",
            "ValidationScheduler", "policy_snapshot", "LocalProcessRuntime",
            "DockerRuntime", "StructuredGateValidator", "StructuredGateValidatorFactory",
-           "cleanup_validation_storage"]
+           "cleanup_validation_storage", "ValidationReservation", "ValidationStore"]

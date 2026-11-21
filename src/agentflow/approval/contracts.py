@@ -3,6 +3,11 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from .consent_contracts import (ConsentDecision, ExecutionPlanConsentBinding,
+                                SecurityProfile)
+from .local_grants import (LocalConsentAuditRecord, LocalGrant,
+                           validate_grant_digest, validate_grant_id)
+
 
 class ApprovalError(RuntimeError):
     """Approval is unavailable, invalid, expired, or already consumed."""

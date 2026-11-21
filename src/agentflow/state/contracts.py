@@ -3,23 +3,9 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from agentflow.contracts.state_errors import (ConflictError, IntegrityError,
+                                             StateError, TransitionError)
 from agentflow.planning.models import Plan
-
-
-class StateError(ValueError):
-    """Rejected state operation."""
-
-
-class IntegrityError(StateError):
-    """Stored state is incompatible or damaged."""
-
-
-class ConflictError(StateError):
-    """Operation ID, revision, or writer conflict."""
-
-
-class TransitionError(StateError):
-    """Invalid transition or unmet guard."""
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,49 @@
 # Plano de implementação
 
+## Reorganização arquitetural — M3.1 autorizado
+
+Referência: [ADR 0023](decisions/0023-apl-execution-identity.md). Extraídos
+serialização JSON canônica, SHA-256, digest de plano local e IDs determinísticos
+para um módulo APL puro. Aliases privados antigos mantêm identidade. Vetores
+fixos protegem bytes e IDs; store, controller, schemas e transações não mudam.
+Esta autorização cobre somente M3.1, não as outras extrações M3 nem M4.
+
+## Reorganização arquitetural — M2.3 autorizado
+
+Referência: [ADR 0021](decisions/0021-apl-security-contract-boundary.md).
+Terceira fatia de M2: APL sem imports de security, limites/orçamento em contrato
+puro e resolver consumindo os tipos de approval. Alias/serialização e gates
+independentes são preservados. Saída: zero ciclos, baseline com 10 exceções e
+remapeamento documentado, testes frios de imports/rejeição de assinatura inválida
+e regressões de execução/retomada. M3 (extrações verticais) e M4 (empacotamento)
+permanecem como próximos marcos, sem execução automática.
+
+Correção de baseline para concluir a validação de retomada: [ADR 0022](decisions/0022-readonly-broker-wal-identity-probe.md),
+sondagem isolada de identidade em erro SQLite específico após crash, sem mudar
+transações e sem tornar banco estrangeiro gravável para reconhecê-lo.
+
+Resultado M2: zero ciclos entre pacotes, 10 exceções arquiteturais restantes;
+suíte final com 813 testes aprovados e 1 ignorado. M3/M4 permanecem pendentes.
+
+## Reorganização arquitetural — M2.2 autorizado
+
+Referência: [ADR 0020](decisions/0020-approval-security-contract-boundary.md).
+Segunda fatia de M2: contratos puros de consentimento/grants em approval,
+aliases históricos em security e persistência sem imports reversos. Nove
+exceções são removidas do baseline. Aceite exige vetores anteriores de JSON/hash,
+processos novos com serviços bloqueados, integridade após reabertura/consumo e
+regressões de concorrência/rollback. APL/security permanece para M2.3.
+
+## Reorganização arquitetural — M2.1 autorizado
+
+Referência: [ADR 0019](decisions/0019-state-validation-contract-boundary.md).
+Primeira fatia de M2: erros compartilhados independentes, reserva/protocolo no
+contrato de validação e remoção do import reverso do scheduler. Aliases históricos
+e transações são preservados; duas exceções do baseline são retiradas. Critérios:
+AST sem ciclo/import reverso, teste em processo novo com state/SQLite bloqueados,
+compatibilidade e suítes de regressão. As fatias approval/security e apl/security
+permanecem seguintes; M3/M4 não entram nesta implementação.
+
 ## Reorganização arquitetural — M1 autorizado
 
 Referência: [ADR 0018](decisions/0018-lean-facades-local-import-isolation.md).

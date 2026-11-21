@@ -4,7 +4,7 @@
 
 O produto é um orquestrador local com CLI, planejamento versionado, estado operacional SQLite e Git para versionamento. O fluxo local oferece execução explícita por Codex, Antigravity, OpenCode ou Claude Code via adaptadores; a homologação real de cada CLI é distinta dos testes sintéticos. Docker é opcional. Use Python 3.11+, pytest, TOML e Apache 2.0.
 
-As ADRs 0011–0016 descrevem o comportamento local vigente; a ADR 0017 define a reorganização arquitetural M0–M4 e a ADR 0018 registra M1 (fachadas sob demanda e isolamento local). Restrições de fases históricas não são proibições globais do produto atual. Implemente apenas a fatia autorizada na solicitação: M1 foi autorizado; M2–M4 não têm autorização automática.
+As ADRs 0011–0016 descrevem o comportamento local vigente; a ADR 0017 define a reorganização arquitetural M0–M4 e as ADRs 0018–0021 registram M1 e as três fatias de M2. A ADR 0022 registra a correção de sondagem SQLite após crash identificada na validação de M2.3. A ADR 0023 autoriza somente M3.1: extração dos cálculos canônicos de identidade APL. Restrições de fases históricas não são proibições globais do produto atual. Implemente apenas a fatia autorizada na solicitação; as demais extrações M3 e M4 não têm autorização automática.
 
 O diretório `autonomous-development-runner/` contém o protótipo ADR 0.1 extraído do ZIP versionado. Preserve seus arquivos e comportamento enquanto uma migração explícita não for aprovada. O README da raiz descreve uma visão mais ampla que o código atual.
 

@@ -74,13 +74,17 @@ def __getattr__(name):
         ):
             module = _import_module("agentflow.apl.restricted_worker")
         elif name in (
-            'AuthorizedExecutionController', 'AuthorizedExecutionError', 'ExecutionLimits',
-            'TaskExecutionLimits', 'NoEffectExecutionError', 'SQLiteAuthorizedExecutionStore',
-            'VerifiedExecutionGrant', 'BrokerExecutionGrantResolver', 'FinancialBudgetMode',
+            'AuthorizedExecutionController', 'AuthorizedExecutionError',
+            'NoEffectExecutionError', 'SQLiteAuthorizedExecutionStore',
+            'VerifiedExecutionGrant', 'BrokerExecutionGrantResolver',
             'LocalExecutionContract', 'LocalExecutionContractResolver', 'LocalAuthorizedExecutionService',
-            'FinancialBudgetPolicy',
         ):
             module = _import_module("agentflow.apl.authorized_execution")
+        elif name in (
+            'ExecutionLimits', 'TaskExecutionLimits',
+            'FinancialBudgetMode', 'FinancialBudgetPolicy',
+        ):
+            module = _import_module("agentflow.apl.execution_contracts")
         elif name in (
             'AcceptanceEvaluation', 'CodexAcceptanceEvidenceValidator', 'CodexAuthorizedJobExecutor',
             'CodexExecutionError', 'PinnedWorkspace', 'PlanGateAcceptanceVerifier',

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
-from enum import Enum
 import hashlib
 import json
 import math
@@ -22,6 +21,13 @@ from typing import Callable, Protocol
 from uuid import uuid4
 
 from .contracts import APLState, CycleSnapshot, ExecutionOutcome, JobProposal
+from .execution_contracts import (ExecutionLimits, TaskExecutionLimits,
+                                  FinancialBudgetMode, FinancialBudgetPolicy)
+from .execution_identity import (attempt_id as _attempt_id,
+                                 canonical_json as _canonical,
+                                 local_plan_digest as _local_plan_digest,
+                                 operation_id as _operation_id,
+                                 sha256_digest as _sha)
 from .failure_recovery import (EffectState, FailureDiagnosis, FailureKind,
                                IntelligentFailureRecoveryPolicy, PriorFailure,
                                QualityResult, Recoverability, RecoveryContext,
@@ -43,33 +49,6 @@ class NoEffectExecutionError(RuntimeError):
         )
 
 
-class FinancialBudgetMode(str, Enum):
-    """Financial policy; an estimate is never a provider-enforced hard cap."""
-
-    HARD_CAP_REQUIRED = "hard_cap_required"
-    ESTIMATED_COST_ACCEPTED = "estimated_cost_accepted"
-
-
-@dataclass(frozen=True)
-class FinancialBudgetPolicy:
-    mode: FinancialBudgetMode
-    estimated_amount: float | None = None
-    currency: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.mode, FinancialBudgetMode):
-            raise ValueError("financial_budget_mode_invalid")
-        if self.mode is FinancialBudgetMode.HARD_CAP_REQUIRED:
-            if self.estimated_amount is not None or self.currency is not None:
-                raise ValueError("hard_cap_policy_cannot_claim_estimate_as_enforcement")
-            return
-        if (type(self.estimated_amount) not in (int, float)
-                or not math.isfinite(self.estimated_amount) or self.estimated_amount <= 0
-                or type(self.currency) is not str
-                or not re.fullmatch(r"[A-Z]{3}", self.currency)):
-            raise ValueError("explicit_finite_cost_estimate_required")
-
-
 def _financial_estimate_limit(grant: "VerifiedExecutionGrant") -> float:
     policy = grant.budget_policy
     if not isinstance(policy, FinancialBudgetPolicy):
@@ -80,42 +59,6 @@ def _financial_estimate_limit(grant: "VerifiedExecutionGrant") -> float:
     if grant.limits.max_estimated_budget > 0:
         values.append(float(grant.limits.max_estimated_budget))
     return min(values)
-
-
-@dataclass(frozen=True)
-class ExecutionLimits:
-    max_jobs: int
-    max_attempts_per_job: int
-    max_seconds: float
-    max_estimated_budget: float = 0.0
-    max_iterations: int = 100
-    max_concurrency: int = 1
-
-    def __post_init__(self) -> None:
-        if (type(self.max_jobs) is not int or self.max_jobs < 1
-                or type(self.max_attempts_per_job) is not int or self.max_attempts_per_job < 1
-                or type(self.max_seconds) not in (float, int) or not math.isfinite(self.max_seconds)
-                or self.max_seconds <= 0
-                or type(self.max_estimated_budget) not in (float, int)
-                or not math.isfinite(self.max_estimated_budget) or self.max_estimated_budget < 0
-                or type(self.max_iterations) is not int or self.max_iterations < 1
-                or type(self.max_concurrency) is not int or self.max_concurrency != 1):
-            raise ValueError("execution_limits_invalid")
-
-
-@dataclass(frozen=True)
-class TaskExecutionLimits:
-    max_attempts: int
-    max_seconds: float
-    max_estimated_budget: float = 0.0
-
-    def __post_init__(self) -> None:
-        if (type(self.max_attempts) is not int or self.max_attempts < 1
-                or type(self.max_seconds) not in (int, float) or not math.isfinite(self.max_seconds)
-                or self.max_seconds <= 0
-                or type(self.max_estimated_budget) not in (int, float)
-                or not math.isfinite(self.max_estimated_budget) or self.max_estimated_budget < 0):
-            raise ValueError("task_execution_limits_invalid")
 
 
 @dataclass(frozen=True)
@@ -374,8 +317,8 @@ class BrokerExecutionGrantResolver:
 
     def resolve_and_validate(self, grant_id: str, cycle_id: str) -> VerifiedExecutionGrant:
         from pathlib import Path
-        from agentflow.security.authorization import LocalGrant
-        from agentflow.security.profile import ExecutionPlanConsentBinding, SecurityProfile
+        from agentflow.approval.contracts import (LocalGrant, ExecutionPlanConsentBinding,
+                                                   SecurityProfile)
 
         try:
             grant, state = self.broker.get_local_grant(grant_id)
@@ -2109,21 +2052,6 @@ class AuthorizedExecutionController:
                 raise AuthorizedExecutionError("persisted_run_binding_changed")
 
 
-def _canonical(value) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _local_plan_digest(snapshot: CycleSnapshot) -> str:
-    """Cryptographic digest of the complete local APL plan binding."""
-    return _sha(_canonical({
-        "cycle_id": snapshot.cycle_id,
-        "objective": snapshot.objective,
-        "revision": snapshot.plan_revision_id,
-        "jobs": [asdict(job) for job in snapshot.jobs],
-        "authorized_scope": list(snapshot.authorized_scope),
-    }))
-
-
 def _local_contract_payload(contract: LocalExecutionContract) -> dict:
     return {
         "contract_id": contract.contract_id,
@@ -2170,23 +2098,9 @@ def _local_contract_from_payload(value: dict) -> LocalExecutionContract:
         raise AuthorizedExecutionError("local_execution_contract_schema_invalid") from exc
 
 
-def _sha(value: str) -> str:
-    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
 def _minimum_positive(*values: float) -> float:
     positive = [value for value in values if value > 0]
     return min(positive) if positive else 0.0
-
-
-def _operation_id(run_id: str, job_id: str, plan_digest: str) -> str:
-    raw = _sha(f"{run_id}:{job_id}:{plan_digest}")[-32:]
-    return "apl-op-" + raw
-
-
-def _attempt_id(run_id: str, job_id: str, attempt: int) -> str:
-    raw = _sha(f"{run_id}:{job_id}:{attempt}")[-32:]
-    return "apl-attempt-" + raw
 
 
 def _diagnosis_record(diagnosis: FailureDiagnosis, reservation: dict) -> dict:

@@ -130,7 +130,7 @@ def prepare_execution_plan_consent_request(authoritative, *, executor_id: str,
                                            financial_budget_policy,
                                            strategies_by_job: dict | None = None):
     """Build a one-time request from persisted plan/workspace facts and local policy."""
-    from agentflow.apl.authorized_execution import (
+    from agentflow.apl.execution_contracts import (
         ExecutionLimits, FinancialBudgetMode, FinancialBudgetPolicy,
         TaskExecutionLimits,
     )
@@ -307,7 +307,7 @@ def review_accepted_execution_plan(*, cycle_store, state_database: Path, broker_
         raise ConsentReviewError("execution_consent_executor_required")
     if type(max_attempts_per_job) is not int or max_attempts_per_job < 1:
         raise ConsentReviewError("execution_consent_attempt_limit_invalid")
-    from agentflow.apl.authorized_execution import (
+    from agentflow.apl.execution_contracts import (
         ExecutionLimits, FinancialBudgetMode, FinancialBudgetPolicy, TaskExecutionLimits,
     )
     try:
