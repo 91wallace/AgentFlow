@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 NATIVE = {f"agentflow.agents.{name}" for name in
-          ("codex", "antigravity", "opencode", "claude_code", "hermes", "factory")}
+          ("codex", "antigravity", "opencode", "claude_code", "hermes", "gemini", "factory")}
 ADVANCED = {"approval", "security", "teg"}
 PURE = {f"agentflow.{name}.contracts" for name in
         ("apl", "approval", "agents", "git", "state", "validation", "teg")}
@@ -20,6 +20,8 @@ PURE.add("agentflow.planning.models")
 PURE.add("agentflow.contracts.state_errors")
 PURE.add("agentflow.apl.execution_contracts")
 PURE.add("agentflow.apl.execution_identity")
+PURE.add("agentflow.agents.roles")
+PURE.add("agentflow.review.contracts")
 PURE.update({"agentflow.approval.consent_contracts", "agentflow.approval.local_grants"})
 PURE.update({"agentflow.approval.protocol", "agentflow.agents.selection"})
 

@@ -1,5 +1,42 @@
 # Plano de implementação
 
+## Incremento E–G — primeiro ciclo de revisão/correção
+
+Implementada a [ADR 0026](decisions/0026-git-aware-review-and-corrections.md):
+baseline segura por tarefa, preservação de alterações preexistentes, diffs
+working/index, contexto incremental e expansão limitada, findings com âncora
+verificada, correções por hash, gates e nova revisão, limites e escalonamento
+ao orquestrador. Migração v9 e journals existentes preservam identidades e
+interrupções desconhecidas sem reexecução automática. Aprovação durável tem
+cache restrito à operação/conteúdo/política/implementação exatos.
+
+Próximas fatias: reconciliação segura de fases incompletas, métricas de tokens
+quando verificáveis, contexto de outras linguagens e modos adicionais de
+revisão. Worker independente, MCP e otimização integral não foram antecipados.
+Evidências e limitações estão no [progresso](autonomous-platform-progress.md).
+
+## Incremento B — papéis e delegação
+
+Implementada a [ADR 0025](decisions/0025-execution-roles-and-delegation.md):
+seleção obrigatória pelo novo `start`, espera sem TTY, configuração parcial,
+snapshot imutável no SQLite v8, revalidação e orquestrador/executor independentes
+usando o planejador, controlador, gates e runtime existentes. Resultados voltam
+ao orquestrador antes de outra delegação. Chamadas concluídas são reutilizadas;
+intents ambíguos bloqueiam sem replay. A ADR 0026 ativa o revisor configurado.
+Evidências e limites ficam no [progresso persistente](autonomous-platform-progress.md).
+MCP, worker independente e otimização integral de comunicação continuam futuros.
+
+## Evolução autônoma A–M — 2026-11-23
+
+A solicitação atual autoriza a evolução incremental A–M, preservando as
+invariantes existentes. O [inventário e progresso persistente](autonomous-platform-progress.md)
+é a referência para entregas e trabalho restante. Descoberta agregada e integração
+inicial Gemini foram implementadas na primeira fatia; a ADR 0025 acrescenta papéis
+e delegação. A ADR 0026 acrescenta o primeiro ciclo de revisão/correção Git-Aware.
+Execução independente, MCP e otimização integral ainda precisam de implementação
+e testes. A plataforma completa não
+está concluída.
+
 ## Reorganização arquitetural — M3.1 autorizado
 
 Referência: [ADR 0023](decisions/0023-apl-execution-identity.md). Extraídos

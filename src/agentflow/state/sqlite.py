@@ -16,6 +16,9 @@ from agentflow.planning.loader import command_data, gate_data, task_data
 
 from .contracts import (ConflictError, EvidenceInput, IntegrityError, TaskState,
                         Transition, TransitionError)
+from .role_schema import ROLE_SCHEMA
+from .review_schema import REVIEW_SCHEMA
+from .worker_schema import WORKER_SCHEMA
 
 
 def now() -> str:
@@ -184,13 +187,17 @@ from .validation_schema import VALIDATION_SCHEMA
 
 class SQLiteStore:
     def __init__(self, path: Path, *, execution: bool = False, git: bool = False,
-                 validation: bool = False, agent_models: bool = False, sdd: bool = False):
+                 validation: bool = False, agent_models: bool = False, sdd: bool = False,
+                 roles: bool = False, review: bool = False, workers: bool = False):
         self.path = path
         self.execution = execution
         self.git = git
         self.validation = validation
         self.agent_models = agent_models
         self.sdd = sdd
+        self.roles = roles
+        self.review = review
+        self.workers = workers
         if validation and not (execution and git):
             raise IntegrityError("validação exige esquemas de execução e Git")
         self.existed = path.exists()
@@ -199,7 +206,7 @@ class SQLiteStore:
         try:
             self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            supported = 7 if (sdd or execution or git or validation or agent_models) else 3
+            supported = 10 if (workers or review or roles or sdd or execution or git or validation or agent_models) else 3
             if version > supported:
                 raise IntegrityError(f"versão SQLite futura: {version}")
             self.db.execute("PRAGMA busy_timeout=5000")
@@ -257,8 +264,8 @@ class SQLiteStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        target = 7 if self.sdd else (5 if self.agent_models else (4 if self.validation else (3 if self.git else (2 if self.execution else 1))))
-        supported_max = 7 if (self.sdd or self.execution or self.git or self.validation or self.agent_models) else 3
+        target = 10 if self.workers else (9 if self.review else (8 if self.roles else (7 if self.sdd else (5 if self.agent_models else (4 if self.validation else (3 if self.git else (2 if self.execution else 1)))))))
+        supported_max = 10 if (self.workers or self.review or self.roles or self.sdd or self.execution or self.git or self.validation or self.agent_models) else 3
         if version > supported_max:
             raise IntegrityError(f"versão SQLite futura: {version}")
         if version:
@@ -290,7 +297,7 @@ class SQLiteStore:
                           if next_version == 3 else VALIDATION_SCHEMA
                           if next_version == 4 else AGENT_SCHEMA
                           if next_version == 5 else SDD_SCHEMA
-                          if next_version == 6 else BUDGET_SCHEMA)
+                          if next_version == 6 else BUDGET_SCHEMA if next_version == 7 else ROLE_SCHEMA if next_version == 8 else REVIEW_SCHEMA if next_version == 9 else WORKER_SCHEMA)
             try:
                 with self.transaction() as db:
                     for statement in statements:

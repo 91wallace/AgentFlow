@@ -9,7 +9,7 @@ class ConfigError(ValueError):
     """Invalid or unreadable AgentFlow configuration."""
 
 
-AGENTS = ("codex", "antigravity", "opencode", "claude-code")
+AGENTS = ("codex", "antigravity", "opencode", "claude-code", "gemini")
 
 
 @dataclass(frozen=True)

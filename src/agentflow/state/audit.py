@@ -80,7 +80,7 @@ def inspect_phase7_database(path: Path) -> dict:
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(1, 8):
+            if version not in range(1, 11):
                 raise IntegrityError("versão SQLite incompatível")
             integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
             if integrity != "ok":

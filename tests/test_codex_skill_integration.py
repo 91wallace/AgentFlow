@@ -82,6 +82,21 @@ def test_objective_run_persists_cycle_and_delegates_to_existing_apl_runner(tmp_p
     delegated = []
     monkeypatch.setattr(cli_module, "main", lambda argv=None: delegated.append(argv) or 0)
 
+    class _FakeCodexAdapter:
+        adapter_id = "codex"
+        api_version = "1"
+        executable = Path("codex")
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def probe_capabilities(self):
+            from types import SimpleNamespace
+            return SimpleNamespace(version="0.169.0")
+
+    monkeypatch.setattr("agentflow.agents.codex.CodexAdapter", _FakeCodexAdapter)
+    monkeypatch.setattr("agentflow.cli.CodexAdapter", _FakeCodexAdapter, raising=False)
+
     assert main(["run", "Add a tiny feature", "--path", str(root),
                  "--allow-unconfined-network"]) == 0
     first = delegated[-1]

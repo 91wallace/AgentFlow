@@ -1,10 +1,15 @@
 # AgentFlow
 
-AgentFlow é um orquestrador híbrido de desenvolvimento de software. O núcleo e a CLI rodam localmente, com planejamento TOML, estado SQLite e execução explícita de tarefas por Codex CLI.
+AgentFlow é um orquestrador híbrido de desenvolvimento de software. O núcleo e a CLI rodam localmente, com planejamento TOML, estado SQLite e execução de tarefas por adaptadores de CLIs de agentes.
 
 ## Uso local
 
-A seleção segue `--agent` → `--invoker-agent` informado pela integração → padrão
+`agentflow start` descobre agentes e pede orquestrador, executor e revisor por
+execução. O revisor sugere usar o orquestrador. Escolhas e respostas parciais
+ficam no SQLite para retomada; sem TTY, informe flags de papéis ou configure
+posteriormente a execução em `AWAITING_CONFIGURATION`. Veja [uso e progresso](docs/autonomous-platform-progress.md).
+
+No `run` legado, a seleção segue `--agent` → `--invoker-agent` informado pela integração → padrão
 do projeto → Codex. Antigravity, OpenCode e Claude Code usam perfis próprios de
 provider/modelo opcionais; sem eles, vale o padrão nativo do CLI. A retomada mantém o executor do job mesmo quando chamada por
 outro agente. Veja [configuração e exemplos](docs/decisions/0014-invoker-agent-selection.md).
@@ -16,10 +21,28 @@ python -m pip install .
 cd caminho/do/repositorio-git
 agentflow init
 agentflow doctor
+agentflow agents --format json # inventário sem iniciar inferência
+agentflow start # seleciona papéis; lê TASKS.json
 agentflow run # lê TASKS.json da raiz; ou: agentflow run "<objetivo>"
 ```
 
 `agentflow init --path caminho` inicializa a raiz do repositório Git que contém o caminho. Cria `.agentflow/config.toml` apenas quando ausente e preserva configurações existentes. Veja [instalação e uso](docs/installation.md) para esquema TOML, testes e códigos de saída.
+
+`agentflow agents` consulta versões dos CLIs registrados e separa instalação,
+capacidades declaradas, autenticação desconhecida e modelo configurado. Gemini
+pode ser selecionado com `--agent gemini`, usando o padrão nativo do CLI. O novo
+fluxo de papéis aceita modelo Gemini explícito como configuração não atestada,
+com provider `native`, e rejeita divergências conhecidas. Veja [limites e progresso da evolução autônoma](docs/autonomous-platform-progress.md).
+
+Novos pedidos com `agentflow start` incluem revisão Git incremental pelo revisor
+selecionado. Correções fundamentadas voltam ao executor, passam por publicação
+guardada por hashes, testes e nova revisão. Alterações preexistentes no escopo
+bloqueiam o dispatch para preservá-las. Use `--review-mode off` para configurar
+um pedido sem revisão, ou `--review-max-corrections 2` para limitar correções.
+Pedidos antigos mantêm a política persistida. `agentflow apl run-status` mostra
+o `operation_id` da tarefa; `agentflow review-status --path caminho --operation-id ID`
+consulta baseline, eventos, resultados e operações pendentes. Consulte os
+[contratos e limites de recuperação](docs/decisions/0026-git-aware-review-and-corrections.md).
 
 `agent = "none"` legado usa Codex sem editar o arquivo. `agentflow run --tasks-file backlog.json` aceita outro backlog. O JSON deve conter uma lista de textos/objetos de tarefa ou um objeto com `tasks` (até 12 tarefas). O planejador deriva escopos e verificações, preservando IDs/dependências explícitos. Cada prompt do loop cobre somente a tarefa atual e pede resposta concisa. A execução local usa os acessos do host; requisitos de login do próprio Codex continuam aplicáveis. Detalhes e limites na [ADR 0011](docs/decisions/0011-local-default-agent-and-backlog.md).
 

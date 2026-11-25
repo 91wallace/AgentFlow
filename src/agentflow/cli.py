@@ -1,6 +1,8 @@
 """Local initialization, planning and explicit task execution CLI."""
 
 import argparse
+from contextlib import ExitStack
+from functools import lru_cache
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -47,7 +49,7 @@ class _NeverCancel:
         return False
 
 
-def _apl_acceptance_policy_digest(plan, choice=None) -> str:
+def _apl_acceptance_policy_digest(plan, choice=None, roles=None, review_policy=None, review_engine=None) -> str:
     value = {
         "spec_digest": plan.spec_digest,
         "tasks_digest": plan.tasks_digest,
@@ -60,7 +62,39 @@ def _apl_acceptance_policy_digest(plan, choice=None) -> str:
     }
     if choice is not None:
         value["executor_selection"] = {"agent": choice.agent, "provider": choice.provider, "model": choice.model}
+    if roles is not None:
+        value["execution_roles"] = roles.to_mapping()
+    if review_policy is not None:
+        value["review_policy"] = review_policy
+    if review_engine is not None:
+        value["review_engine"] = review_engine
     return "sha256:" + hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def _review_engine_version():
+    from .apl import code_review
+    from .git import change_tracker
+    from .review import contracts, context
+    return digest({"schema_version": 1, "sources": [hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+                   for module in (code_review, change_tracker, contracts, context)]})
+
+
+def _role_choice(binding):
+    selection = binding.model_selection
+    return AgentChoice(binding.agent_id, selection.provider_id if selection else "",
+                       selection.model_id if selection else "", "roles")
+
+
+def _role_planner(state_path, request_id, roles, *, timeout=240, idle=300, max_plan_reads=8):
+    from .agents.factory import create_role_adapter
+    from .apl.codex_planner import CodexCLIPlannerAdapter
+    from .apl.role_orchestration import JournaledOrchestrator
+    from .state.roles import RoleCallJournal
+    planner = CodexCLIPlannerAdapter(state_path, enabled=True, timeout_seconds=timeout,
+        max_input_bytes=None, max_output_bytes=65536, idle_seconds=idle or None,
+        max_plan_reads=max_plan_reads, agent_adapter=create_role_adapter(roles.orchestrator))
+    return JournaledOrchestrator(RoleCallJournal(state_path), request_id, planner)
 
 
 def _agent_arguments(command, *, init=False):
@@ -193,11 +227,38 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentflow")
     parser.add_argument("--version", action="version", version=f"agentflow {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "doctor", "plan", "state", "audit", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup", "approval-preview"):
+    agents = commands.add_parser("agents", help="descobrir CLIs sem iniciar inferência")
+    agents.add_argument("--path", type=Path, default=Path.cwd())
+    agents.add_argument("--format", choices=("human", "json"), default="human")
+    cfg_cmd = commands.add_parser("config", help="gerenciar configuração global de agentes e modelos")
+    cfg_sub = cfg_cmd.add_subparsers(dest="config_action")
+    cfg_sub.add_parser("show", help="exibir configuração global atual")
+    cfg_sub.add_parser("check", help="verificar disponibilidade dos agentes configurados")
+    cfg_sub.add_parser("reset", help="restaurar configuração global padrão")
+    cfg_sub.add_parser("wizard", help="assistente interativo de configuração global")
+    cfg_set = cfg_sub.add_parser("set", help="atualizar configuração global")
+    cfg_set.add_argument("--orchestrator-agent", choices=AGENTS)
+    cfg_set.add_argument("--orchestrator-provider", default=None)
+    cfg_set.add_argument("--orchestrator-model", default=None)
+    cfg_set.add_argument("--worker-agent", choices=AGENTS)
+    cfg_set.add_argument("--worker-provider", default=None)
+    cfg_set.add_argument("--worker-model", default=None)
+    cfg_set.add_argument("--max-workers", type=int)
+    cfg_set.add_argument("--distribution-policy", choices=("round-robin", "reuse-first", "isolated"))
+    cfg_set.add_argument("--subagent", action="append", default=[], help="papel=agente (ex: research=gemini)")
+    cfg_set.add_argument("--adversarial", choices=("on", "off"))
+    cfg_set.add_argument("--adversarial-agent", choices=AGENTS)
+    cfg_set.add_argument("--fallback-policy", choices=("none", "ordered", "same-provider"))
+    cfg_set.add_argument("--fallback-models", default=None, help="lista separada por vírgula")
+    for name in ("init", "doctor", "plan", "state", "audit", "execute", "cancel", "recover", "cleanup", "workspaces", "git-recover", "checkpoint", "verify-no-changes", "complete", "validate", "validation-state", "validation-cleanup", "approval-preview", "review-status"):
         command = commands.add_parser(name)
         command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
         if name == "init":
             _agent_arguments(command, init=True)
+            command.add_argument("--non-interactive", action="store_true",
+                                 help="usar configuração global válida ou padrão sem perguntas")
+            command.add_argument("--keep-global", action="store_true",
+                                 help="manter configuração global existente sem perguntar")
         if name == "execute":
             _agent_arguments(command)
         if name == "approval-preview":
@@ -206,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--request-id", required=True)
         if name == "audit":
             command.add_argument("--format", choices=("human", "json"), default="human")
+        if name == "review-status":
+            command.add_argument("--operation-id", required=True)
         if name == "execute":
             command.add_argument("--task", required=True)
             command.add_argument("--operation-id", required=True)
@@ -239,12 +302,24 @@ def main(argv: list[str] | None = None) -> int:
         if name == "complete":
             command.add_argument("--expected-revision", type=int, required=True)
     objective_run = commands.add_parser(
-        "run", help="planejar e executar um objetivo no workspace local")
+        "run", aliases=["start"], help="run legado; start seleciona papéis e delega entre agentes")
     objective_run.add_argument("objective", nargs="?", help="objetivo; omitido: lê TASKS.json")
     objective_run.add_argument("--tasks-file", type=Path,
                                help="backlog JSON; relativo à raiz do projeto")
     objective_run.add_argument("--plan-dir", type=Path, help="plano TOML pronto; dispensa planejador")
     _agent_arguments(objective_run)
+    for role in ("orchestrator", "executor", "reviewer"):
+        objective_run.add_argument(f"--{role}-agent", choices=(*AGENTS, "same") if role == "reviewer" else AGENTS)
+        objective_run.add_argument(f"--{role}-provider")
+        objective_run.add_argument(f"--{role}-model")
+    objective_run.add_argument("--configure-only", action="store_true",
+                               help="descobrir e persistir papéis sem inferência ou dispatch")
+    objective_run.add_argument("--review-mode", choices=("automatic", "off"))
+    objective_run.add_argument("--review-max-corrections", type=int, default=2)
+    objective_run.add_argument("--review-max-calls", type=int, default=8)
+    objective_run.add_argument("--review-max-seconds", type=int, default=600)
+    objective_run.add_argument("--review-max-payload-bytes", type=int, default=524288)
+    objective_run.add_argument("--review-no-progress-limit", type=int, default=1)
     objective_run.add_argument("--path", type=Path, default=Path.cwd(), help="workspace do projeto")
     objective_run.add_argument("--allow-unconfined-network", action="store_true",
                                help=argparse.SUPPRESS)
@@ -257,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     objective_run.add_argument("--planner-max-plan-reads", type=int, default=8)
     objective_run.add_argument("--operation-id", default="",
                                help="chave explícita para iniciar uma nova execução; sem ela o pedido idêntico é idempotente")
+    objective_run.add_argument("--managed", action="store_true", help="executar APL por worker persistente destacado")
     profile = commands.add_parser("profile", help="compatibilidade: perfil local não é mais necessário")
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
     profile_status = profile_commands.add_parser("status", help="informar que perfil e autenticação não são requeridos")
@@ -267,6 +343,15 @@ def main(argv: list[str] | None = None) -> int:
                                 choices=("LOCAL_SUPERVISED", "INDEPENDENT_AUTHORITY"))
     profile_select.add_argument("--confirm", action="store_true", required=True,
                                 help="confirma a seleção local persistente do perfil")
+    worker_commands = commands.add_parser("worker", help="controlar execução APL gerenciada")
+    worker_sub = worker_commands.add_subparsers(dest="worker_command", required=True)
+    for worker_action in ("status", "pause", "resume", "cancel"):
+        child = worker_sub.add_parser(worker_action)
+        child.add_argument("--path", type=Path, default=Path.cwd())
+        if worker_action != "status":
+            child.add_argument("--run-id", required=True)
+    mcp = commands.add_parser("mcp", help="servidor MCP local stdio")
+    mcp.add_argument("--path", type=Path, default=Path.cwd())
     codex_skill = commands.add_parser("codex-skill", help="instalar a Skill local do Codex CLI")
     codex_skill_commands = codex_skill.add_subparsers(dest="codex_skill_command", required=True)
     codex_skill_install = codex_skill_commands.add_parser("install", help="instalar a Skill AgentFlow")
@@ -294,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
                                    help="confirma explicitamente a revogação")
     apl = commands.add_parser("apl", help="inspecionar ciclos Autonomous Planning Loop")
     apl_commands = apl.add_subparsers(dest="apl_command", required=True)
-    for apl_name in ("start", "status", "history", "inspect", "pause", "resume", "cancel", "next", "submit-result", "replan", "proposals", "accept-plan", "reject-plan", "handoff", "handoff-status", "handoff-resume", "handoff-cancel", "handoff-review", "authorize-plan", "run", "run-status", "run-cancel", "run-resume"):
+    for apl_name in ("start", "status", "history", "inspect", "pause", "resume", "cancel", "next", "submit-result", "replan", "proposals", "accept-plan", "reject-plan", "handoff", "handoff-status", "handoff-resume", "handoff-cancel", "handoff-review", "authorize-plan", "run", "run-status", "run-cancel", "run-resume", "run-pause"):
         apl_command = apl_commands.add_parser(apl_name)
         apl_command.add_argument("--path", type=Path, default=Path.cwd(), help="caminho dentro do repositório Git")
         if apl_name == "start":
@@ -305,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
         elif apl_name not in {"status", "proposals", "accept-plan", "reject-plan",
                               "handoff", "handoff-status", "handoff-resume", "handoff-cancel",
                               "handoff-review", "authorize-plan", "run", "run-status",
-                              "run-cancel", "run-resume"}:
+                              "run-cancel", "run-resume", "run-pause"}:
             apl_command.add_argument("--cycle-id", required=True)
         if apl_name == "submit-result":
             apl_command.add_argument("--attempt-id", required=True,
@@ -346,6 +431,9 @@ def main(argv: list[str] | None = None) -> int:
             apl_command.add_argument("--max-attempts-per-job", type=int, default=1)
             apl_command.add_argument("--financial-budget-mode", required=True,
                                      choices=("hard_cap_required", "estimated_cost_accepted"))
+        if apl_name in {"run", "run-resume"}:
+            apl_command.add_argument("--managed", action="store_true",
+                                     help="executar ou retomar pelo worker persistente destacado")
         if apl_name == "run":
             _agent_arguments(apl_command)
             apl_command.add_argument("--cycle-id", required=True)
@@ -361,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
             apl_command.add_argument("--task-timeout", type=int, default=1800)
             apl_command.add_argument("--plan-dir", type=Path, default=None,
                                      help=argparse.SUPPRESS)
-        if apl_name in {"run-status", "run-cancel", "run-resume"}:
+        if apl_name in {"run-status", "run-cancel", "run-resume", "run-pause"}:
             apl_command.add_argument("--run-id", required=True)
         if apl_name == "run-resume":
             apl_command.add_argument("--idle-seconds", type=_idle_value, default=300)
@@ -377,9 +465,64 @@ def main(argv: list[str] | None = None) -> int:
             apl_command.add_argument("--planner-timeout", type=int, default=240)
             apl_command.add_argument("--planner-max-input-bytes", type=int, default=65536)
             apl_command.add_argument("--planner-max-output-bytes", type=int, default=65536)
+    resources = ExitStack()
     try:
         args = parser.parse_args(argv)
-        if args.command == "run":
+        if args.command == "review-status":
+            from .state.review import inspect_review
+            root = repository_root(args.path.resolve())
+            result = inspect_review(root / ".agentflow" / "state.sqlite3", args.operation_id)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result else 2
+        if args.command == "mcp":
+            from .mcp_server import serve_stdio
+            return serve_stdio(args.path.resolve())
+        if args.command == "worker":
+            from .worker import command as worker_control, inspect as worker_inspect
+            result = (worker_inspect(args.path.resolve()) if args.worker_command == "status"
+                      else worker_control(args.path.resolve(), args.worker_command, args.run_id))
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result is not None else 2
+        if args.command == "agents":
+            from .agents.discovery import discover_agents
+            from .agents.factory import create_registry
+            config_path = args.path.resolve() / ".agentflow" / "config.toml"
+            config = load_config(config_path) if config_path.is_file() else Config()
+            reports = discover_agents(create_registry(), profiles=config.profiles)
+            if args.format == "json":
+                print(json.dumps({"schema_version": 1, "agents": [asdict(report) for report in reports]},
+                                 ensure_ascii=False, sort_keys=True))
+            else:
+                for report in reports:
+                    observed = report.availability
+                    print(f"{observed.adapter_id}: {observed.status}; "
+                          f"executável={observed.executable}; versão={observed.version or 'unknown'}; "
+                          f"autenticação={report.authentication}; modelos={report.model_listing}")
+                    if report.configured_model:
+                        print(f"  modelo configurado: {report.configured_provider}/{report.configured_model} "
+                              "(acesso não verificado)")
+            return 0
+        if args.command in {"run", "start"} or (args.command == "apl" and args.apl_command in {"run", "run-resume"}):
+            if args.managed:
+                operation_id = (args.operation_id if args.apl_command == "run" else
+                                "resume:" + args.run_id if args.apl_command == "run-resume" else args.operation_id)
+                if not operation_id:
+                    raise StateError("managed_execution_requires_explicit_operation_id")
+                from .worker import launch as launch_managed
+                command_args = list(argv) if argv is not None else sys.argv[1:]
+                command_args = [part for part in command_args if part != "--managed"]
+                if args.apl_command == "run-resume":
+                    operation_id = args.run_id
+                result = launch_managed(args.path, command_args, operation_id=operation_id)
+                print(json.dumps({"event": "managed_run_queued", **result}, sort_keys=True), flush=True)
+                return 0
+        if args.command in {"run", "start"}:
+            managed_operation = os.environ.get("AGENTFLOW_MANAGED_OPERATION")
+            if managed_operation:
+                from .worker import inspect as inspect_worker
+                current = inspect_worker(args.path, managed_operation)
+                if current and current["run"] and current["run"].get("apl", {}).get("status") == "blocked" and current["run"]["apl"].get("reason") == "paused_at_task_boundary":
+                    return 2
             if os.environ.get("AGENTFLOW_MANAGED_EXECUTION") == "1":
                 raise StateError("nested_agentflow_orchestration_blocked")
             root = repository_root(args.path.resolve())
@@ -422,12 +565,101 @@ def main(argv: list[str] | None = None) -> int:
             from .apl import SQLiteCycleStore, SupervisedCycleService
             from .apl import SQLiteAuthorizedExecutionStore
             state_path = root / ".agentflow" / "state.sqlite3"
+            roles = None
+            review_limits_changed = (args.review_max_corrections, args.review_max_calls, args.review_max_seconds,
+                                     args.review_max_payload_bytes, args.review_no_progress_limit) != (2, 8, 600, 524288, 1)
+            role_mode = args.command == "start" or args.configure_only or args.review_mode is not None or review_limits_changed or any(
+                getattr(args, f"{role}_{field}") for role in ("orchestrator", "executor", "reviewer")
+                for field in ("agent", "provider", "model"))
+            role_request_id = None
+            if role_mode:
+                from .agents.factory import create_registry, create_role_adapter
+                from .agents.discovery import discover_agents
+                from .state.roles import RoleConfigurationStore
+                from .role_cli import choose_roles, present_inventory
+                input_data = {"workspace": str(root.resolve(strict=True)), "objective": args.objective,
+                              "ready_plan": _generated_plan_digest(ready_plan) if ready_plan else None,
+                              "master_plan": master_reference.reference() if master_reference else None,
+                              "limits": {name: getattr(args, name) for name in (
+                                  "max_seconds", "max_estimated_cost", "max_attempts_per_job",
+                                  "task_timeout", "planner_timeout", "planner_max_plan_reads", "idle_seconds")}}
+                from .review.contracts import ReviewPolicy
+                review_policy = ReviewPolicy(mode=args.review_mode or "automatic",
+                    max_corrections=args.review_max_corrections, max_calls=args.review_max_calls,
+                    max_seconds=args.review_max_seconds, max_payload_bytes=args.review_max_payload_bytes,
+                    no_progress_limit=args.review_no_progress_limit)
+                legacy_input = dict(input_data)
+                input_data["review_policy"] = asdict(review_policy)
+                if review_policy.mode == "automatic":
+                    input_data["review_engine"] = _review_engine_version()
+                role_request_id = hashlib.sha256((str(root.resolve()) + "\0" +
+                    (args.operation_id or digest(input_data))).encode()).hexdigest()[:32]
+                reports = discover_agents(create_registry(), profiles=config.profiles)
+                if sys.stdin.isatty():
+                    present_inventory(reports, sys.stdout)
+                else:
+                    print(json.dumps({"event": "agent_discovery", "request_id": role_request_id,
+                                      "agents": [asdict(report) for report in reports]}, ensure_ascii=False), flush=True)
+                requested = {role: {field: getattr(args, f"{role}_{field}")
+                                    for field in ("agent", "provider", "model")}
+                             for role in ("orchestrator", "executor", "reviewer")}
+                for field in ("agent", "provider", "model"):
+                    legacy_value = getattr(args, field)
+                    explicit_value = requested["executor"][field]
+                    if legacy_value is not None:
+                        if explicit_value is not None and explicit_value != legacy_value:
+                            raise ConfigError("executor_selection_arguments_conflict")
+                        requested["executor"][field] = legacy_value
+                from .global_config import load_global_config
+                global_cfg = load_global_config()
+                if global_cfg is not None:
+                    role_defaults = {
+                        "orchestrator": global_cfg.orchestrator,
+                        "executor": global_cfg.worker_default,
+                    }
+                    if global_cfg.adversarial_enabled and global_cfg.adversarial.agent:
+                        role_defaults["reviewer"] = global_cfg.adversarial
+                    for role_name, cfg_role in role_defaults.items():
+                        if requested[role_name]["agent"] is None and cfg_role.agent:
+                            requested[role_name]["agent"] = cfg_role.agent
+                            if requested[role_name]["provider"] is None and cfg_role.provider:
+                                requested[role_name]["provider"] = cfg_role.provider
+                            if requested[role_name]["model"] is None and cfg_role.model:
+                                requested[role_name]["model"] = cfg_role.model
+                    if requested["reviewer"]["agent"] is None and not global_cfg.adversarial_enabled:
+                        requested["reviewer"]["agent"] = "same"
+                with RoleConfigurationStore(state_path) as role_store:
+                    # Existing v8 requests retain their original immutable policy.
+                    legacy_id = hashlib.sha256((str(root.resolve()) + "\0" +
+                        (args.operation_id or digest(legacy_input))).encode()).hexdigest()[:32]
+                    old = role_store.db.execute("SELECT input_json FROM role_requests WHERE request_id=?", (legacy_id,)).fetchone()
+                    if args.review_mode is None and review_policy == ReviewPolicy() and old and old[0] == canonical(legacy_input):
+                        input_data, role_request_id = legacy_input, legacy_id
+                    role_store.request(role_request_id, input_data)
+                    role_store.record_inventory(role_request_id, [asdict(report) for report in reports])
+                    roles = choose_roles(role_store, role_request_id, reports, requested,
+                                         input_stream=sys.stdin, output_stream=sys.stdout,
+                                         validate_binding=create_role_adapter)
+                print(json.dumps({"event": "role_configuration", "request_id": role_request_id,
+                                  "status": "CONFIGURED" if roles else "AWAITING_CONFIGURATION",
+                                  "roles": roles.to_mapping() if roles else None,
+                                  "review_policy": input_data.get("review_policy")}, ensure_ascii=False), flush=True)
+                if roles is None or args.configure_only:
+                    return 0 if roles else 2
+                choice = _role_choice(roles.executor)
             planner_options = ({"agent_adapter": _adapter_for_choice(choice)}
-                               if ready_plan is None and (choice.agent != "codex" or choice.model) else {})
-            planner = None if ready_plan is not None else CodexCLIPlannerAdapter(
-                state_path, enabled=True, timeout_seconds=args.planner_timeout,
-                max_input_bytes=None, max_output_bytes=65536, idle_seconds=args.idle_seconds or None,
-                max_plan_reads=args.planner_max_plan_reads, **planner_options)
+                               if roles is None and ready_plan is None and (choice.agent != "codex" or choice.model) else {})
+            if roles is not None:
+                planner = _role_planner(state_path, role_request_id, roles,
+                    timeout=args.planner_timeout, idle=args.idle_seconds,
+                    max_plan_reads=args.planner_max_plan_reads)
+            elif ready_plan is not None:
+                planner = None
+            else:
+                planner = CodexCLIPlannerAdapter(
+                    state_path, enabled=True, timeout_seconds=args.planner_timeout,
+                    max_input_bytes=None, max_output_bytes=65536, idle_seconds=args.idle_seconds or None,
+                    max_plan_reads=args.planner_max_plan_reads, **planner_options)
             if task_source is not None:
                 from .planning.task_source import TaskSourcePlanner
                 planner = TaskSourcePlanner(task_source, planner)
@@ -437,10 +669,17 @@ def main(argv: list[str] | None = None) -> int:
             objective_digest = hashlib.sha256(args.objective.encode("utf-8")).hexdigest()
             request_id = hashlib.sha256(
                 f"{workspace_identity}\0{objective_digest}".encode()).hexdigest()[:32]
+            if roles is not None:
+                request_id = role_request_id
             if ready_plan is not None:
                 plan, plan_directory = ready_plan, (root / args.plan_dir).resolve()
             else:
                 plan, plan_directory, _ = prepare_objective_plan(root, args.objective, request_id, planner)
+            if roles is not None:
+                # Also covers a matching pre-existing plan reused by initial_planning.
+                # A TaskSourcePlanner wraps only initial decomposition, not decisions.
+                decision_planner = planner.planner if task_source is not None else planner
+                decision_planner.inspect_plan(plan)
             if master_reference is not None:
                 master_reference.verify()
             if not plan.tasks or any(not task.gates or not task.acceptance_criteria
@@ -455,6 +694,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{workspace_identity}\0{args.objective}\0{plan.spec_digest}\0{plan.tasks_digest}\0{choice.agent}:{choice.provider}:{choice.model}".encode()
             ).hexdigest()
             operation_id = args.operation_id or "objective-run-" + request_hash[:32]
+            if roles is not None:
+                operation_id = "role-run-" + role_request_id
             cycle_id = hashlib.sha256(f"cycle:{operation_id}".encode()).hexdigest()[:32]
             _write_objective_cycle_manifest(root, cycle_id, plan_directory, plan, operation_id)
             execution_store = SQLiteAuthorizedExecutionStore(str(state_path))
@@ -480,6 +721,9 @@ def main(argv: list[str] | None = None) -> int:
                 cycle = SupervisedCycleService(cycle_store, state_path).start(
                     plan, args.objective, scope, cycle_id=cycle_id)
             persist_selection(root, cycle.cycle_id, choice)
+            if roles is not None:
+                with RoleConfigurationStore(state_path) as role_store:
+                    role_store.bind_cycle(role_request_id, cycle.cycle_id)
             print(json.dumps({"event": "cycle_persisted", "cycle_id": cycle.cycle_id,
                               "task_count": len(cycle.jobs), "plan_digest": cycle.plan_digest,
                               "plan_directory": str(plan_directory), "dispatch_started": False},
@@ -505,13 +749,115 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         if args.command == "init":
-            root, created = initialize(args.path, agent=args.agent or args.invoker_agent)
+            from .agents.discovery import discover_agents
+            from .agents.factory import create_registry
+            from .global_config import (RoleModelConfig, default_global_config,
+                                        global_config_path, load_global_config,
+                                        save_global_config)
+            interactive = sys.stdin.isatty() and not args.non_interactive
+            global_cfg = load_global_config()
+            if global_cfg is None:
+                reports = discover_agents(create_registry())
+                available = [r.descriptor.adapter_id for r in reports if r.availability.status == "available"]
+                preferred = args.agent or args.invoker_agent or (available[0] if available else "codex")
+                if interactive:
+                    print("Nenhuma configuração global encontrada. Iniciando assistente de configuração.")
+                    print(f"Agentes detectados no ambiente: {', '.join(available) if available else 'nenhum (usando padrão codex)'}")
+                    chosen_orch = input(f"Agente do orquestrador [{preferred}]: ").strip() or preferred
+                    chosen_worker = input(f"Agente padrão dos workers [{chosen_orch}]: ").strip() or chosen_orch
+                    global_cfg = default_global_config(chosen_orch)
+                    global_cfg.worker_default = RoleModelConfig(agent=chosen_worker)
+                else:
+                    global_cfg = default_global_config(preferred)
+                save_global_config(global_cfg)
+            elif interactive and not args.keep_global:
+                print("Foi encontrada uma configuração global do AgentFlow.\n")
+                print("Deseja manter a configuração atual de agentes e modelos?")
+                print("1. Manter configuração global (padrão)")
+                print("2. Alterar configuração")
+                choice = input("Escolha [1]: ").strip() or "1"
+                if choice == "2":
+                    chosen_orch = input(f"Agente do orquestrador [{global_cfg.orchestrator.agent}]: ").strip() or global_cfg.orchestrator.agent
+                    chosen_worker = input(f"Agente padrão dos workers [{global_cfg.worker_default.agent}]: ").strip() or global_cfg.worker_default.agent
+                    global_cfg.orchestrator = RoleModelConfig(agent=chosen_orch)
+                    global_cfg.worker_default = RoleModelConfig(agent=chosen_worker)
+                    save_global_config(global_cfg)
+            effective_init_agent = args.agent or args.invoker_agent or global_cfg.orchestrator.agent
+            root, created = initialize(args.path, agent=effective_init_agent)
             print(f"{root}: configuração {'criada' if created else 'existente; sem alterações'}")
             config = load_config(root / ".agentflow" / "config.toml")
-            print(f"Agente: {config.effective_agent}; runtime: {config.runtime}. Sem perfil ou autenticação AgentFlow.")
+            print(f"Agente: {config.effective_agent}; runtime: {config.runtime}. Global: {global_config_path()}")
             print("Próximo: agentflow run" if (root / "TASKS.json").is_file()
                   else 'Próximo: agentflow run "<objetivo>" ou crie TASKS.json e use agentflow run')
             return 0
+        if args.command == "config":
+            from .agents.discovery import discover_agents
+            from .agents.factory import create_registry
+            from .global_config import (RoleModelConfig, default_global_config,
+                                        global_config_path, load_global_config,
+                                        save_global_config)
+            action = args.config_action or "show"
+            if action == "reset":
+                cfg = default_global_config()
+                path = save_global_config(cfg)
+                print(json.dumps({"reset": True, "path": str(path), "config": cfg.to_dict()}, ensure_ascii=False, sort_keys=True))
+                return 0
+            cfg = load_global_config() or default_global_config()
+            if action == "show":
+                print(json.dumps({"path": str(global_config_path()), "config": cfg.to_dict()}, ensure_ascii=False, sort_keys=True))
+                return 0
+            if action == "check":
+                reports = {r.descriptor.adapter_id: r for r in discover_agents(create_registry())}
+                checks = {}
+                for role, agent_name in (("orchestrator", cfg.orchestrator.agent), ("worker_default", cfg.worker_default.agent)):
+                    rep = reports.get(agent_name)
+                    checks[role] = {"agent": agent_name, "status": rep.availability.status if rep else "unknown", "authentication": rep.authentication if rep else "unknown"}
+                if cfg.adversarial_enabled and cfg.adversarial.agent:
+                    rep = reports.get(cfg.adversarial.agent)
+                    checks["adversarial"] = {"agent": cfg.adversarial.agent, "status": rep.availability.status if rep else "unknown", "authentication": rep.authentication if rep else "unknown"}
+                print(json.dumps({"checks": checks}, ensure_ascii=False, sort_keys=True))
+                return 0
+            if action == "wizard":
+                chosen_orch = input(f"Agente do orquestrador [{cfg.orchestrator.agent}]: ").strip() or cfg.orchestrator.agent
+                chosen_worker = input(f"Agente padrão dos workers [{cfg.worker_default.agent}]: ").strip() or cfg.worker_default.agent
+                cfg.orchestrator = RoleModelConfig(agent=chosen_orch)
+                cfg.worker_default = RoleModelConfig(agent=chosen_worker)
+                path = save_global_config(cfg)
+                print(json.dumps({"saved": True, "path": str(path), "config": cfg.to_dict()}, ensure_ascii=False, sort_keys=True))
+                return 0
+            if action == "set":
+                if args.orchestrator_agent:
+                    cfg.orchestrator = RoleModelConfig(
+                        agent=args.orchestrator_agent,
+                        provider=args.orchestrator_provider if args.orchestrator_provider is not None else cfg.orchestrator.provider,
+                        model=args.orchestrator_model if args.orchestrator_model is not None else cfg.orchestrator.model,
+                    )
+                if args.worker_agent:
+                    cfg.worker_default = RoleModelConfig(
+                        agent=args.worker_agent,
+                        provider=args.worker_provider if args.worker_provider is not None else cfg.worker_default.provider,
+                        model=args.worker_model if args.worker_model is not None else cfg.worker_default.model,
+                    )
+                if args.max_workers is not None:
+                    cfg.max_concurrent_workers = args.max_workers
+                if args.distribution_policy:
+                    cfg.worker_distribution_policy = args.distribution_policy
+                for item in args.subagent:
+                    if "=" not in item:
+                        raise ConfigError("use o formato papel=agente em --subagent")
+                    role_name, sub_agent = item.split("=", 1)
+                    cfg.subagents[role_name.strip()] = RoleModelConfig(agent=sub_agent.strip())
+                if args.adversarial is not None:
+                    cfg.adversarial_enabled = args.adversarial == "on"
+                if args.adversarial_agent:
+                    cfg.adversarial = RoleModelConfig(agent=args.adversarial_agent)
+                if args.fallback_policy:
+                    cfg.fallback_policy = args.fallback_policy
+                if args.fallback_models is not None:
+                    cfg.fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()]
+                path = save_global_config(cfg)
+                print(json.dumps({"saved": True, "path": str(path), "config": cfg.to_dict()}, ensure_ascii=False, sort_keys=True))
+                return 0
         if args.command == "profile":
             print(json.dumps({"profile": None, "configuration_status": "not_required",
                               "authentication_required": False, "authority_available": False,
@@ -548,12 +894,19 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             store = SQLiteCycleStore(state_path, initialize=args.apl_command in {"replan", "proposals", "accept-plan", "reject-plan"})
             service = SupervisedCycleService(store, state_path)
+            if args.apl_command == "run-pause":
+                from .worker import command as worker_control
+                result = worker_control(root, "pause", args.run_id)
+                print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+                return 0
             if args.apl_command in {"run-status", "run-cancel"}:
                 from .apl import SQLiteAuthorizedExecutionStore
+                from .state.roles import roles_for_cycle, RoleCallJournal
                 execution_store = SQLiteAuthorizedExecutionStore(str(state_path))
                 run = execution_store.load(args.run_id)
                 binding = json.loads(run["binding_json"])
                 selected = read_selection(root, run["cycle_id"])
+                role_info = roles_for_cycle(state_path, run["cycle_id"])
                 if binding.get("authorization_mode") != "local_execution_contract":
                     raise StateError("local_execution_contract_required")
                 if args.apl_command == "run-cancel":
@@ -569,11 +922,15 @@ def main(argv: list[str] | None = None) -> int:
                     "provider": selected.provider if selected else None,
                     "model": selected.model if selected else None,
                     "selection_mode": "manual" if selected and selected.model else "cli-default",
+                    **({"roles": role_info[1].to_mapping(),
+                        "orchestrator_seconds": RoleCallJournal(state_path).completed_decision_seconds(role_info[0])}
+                       if role_info else {}),
                     "status": run["status"], "reason": run["reason"],
                     "jobs_started": run["jobs_started"], "attempts": run["attempts"],
                     "consumed_seconds": run["consumed_seconds"],
                     "consumed_estimated_cost": run["consumed_budget"],
                     "tasks": [{"job_id": item["job_id"], "status": item["status"],
+                               "operation_id": item["operation_id"],
                                "attempts": item["attempts"],
                                "evidence_digest": item["evidence_digest"],
                                "process_identity_recorded": bool(item["process_identity_json"])}
@@ -618,6 +975,11 @@ def main(argv: list[str] | None = None) -> int:
                     binding = json.loads(existing["binding_json"])
                     if binding.get("authorization_mode") != "local_execution_contract":
                         raise StateError("local_execution_contract_required")
+                    if existing.get("status") == "completed":
+                        print(json.dumps({"event": "existing_run", "run_id": args.run_id,
+                                          "cycle_id": existing["cycle_id"], "status": "completed",
+                                          "dispatch_started": False}, sort_keys=True))
+                        return 0
                     cycle_id = existing["cycle_id"]
                     plan_directory = ((args.plan_dir or _objective_plan_directory(
                         root, cycle_id, root / ".agentflow")).resolve(strict=True))
@@ -642,12 +1004,42 @@ def main(argv: list[str] | None = None) -> int:
                             or len(args.currency) != 3 or not args.currency.isalpha()):
                         raise StateError("local_execution_limits_invalid")
                 stored_choice = read_selection(root, cycle_id)
-                if args.apl_command == "run":
+                from .state.roles import roles_for_cycle, RoleConfigurationStore, request_input
+                role_info = roles_for_cycle(state_path, cycle_id)
+                observer = None
+                selected_roles = None
+                review_config = None
+                review_engine = None
+                if role_info:
+                    from .agents.factory import create_role_adapter, create_registry
+                    from .agents.discovery import discover_agents
+                    from .apl.role_selection import validate_roles
+                    role_request_id, selected_roles = role_info
+                    validate_roles(selected_roles, discover_agents(create_registry()))
+                    choice = _role_choice(selected_roles.executor)
+                    if (getattr(args, "agent", None) is not None and args.agent != choice.agent
+                            or getattr(args, "provider", None) is not None and args.provider != choice.provider
+                            or getattr(args, "model", None) is not None and args.model != choice.model):
+                        raise StateError("role_executor_override_forbidden")
+                    choice = persist_selection(root, cycle_id, choice)
+                    with RoleConfigurationStore(state_path) as role_store:
+                        selected_input = role_store.input_data(role_request_id)
+                        options = selected_input["limits"]
+                        review_config = selected_input.get("review_policy")
+                        review_engine = selected_input.get("review_engine")
+                        if review_config and review_config["mode"] == "automatic" and review_engine != _review_engine_version():
+                            raise StateError("review_engine_changed: inicie nova execução; histórico preservado")
+                    orchestrator = _role_planner(state_path, role_request_id, selected_roles,
+                        timeout=options["planner_timeout"], idle=options["idle_seconds"],
+                        max_plan_reads=options["planner_max_plan_reads"])
+                    observer = orchestrator.observe_result
+                elif args.apl_command == "run":
                     choice = persist_selection(root, cycle_id, _selected_agent(args, root))
                 else:
                     choice = stored_choice or AgentChoice(binding["executor_id"])
-                policy_digest = _apl_acceptance_policy_digest(plan, choice if read_selection(root, cycle_id) else None)
-                adapter = _adapter_for_choice(choice)
+                policy_digest = _apl_acceptance_policy_digest(plan, choice if read_selection(root, cycle_id) else None,
+                                                             selected_roles, review_config, review_engine)
+                adapter = create_role_adapter(selected_roles.executor) if selected_roles else _adapter_for_choice(choice)
                 availability = adapter.discover()
                 if availability.status != "available" or not availability.version:
                     raise StateError(
@@ -669,7 +1061,13 @@ def main(argv: list[str] | None = None) -> int:
                     def resolve(self, candidate_cycle_id):
                         if candidate_cycle_id != cycle_id:
                             return ""
-                        return _apl_acceptance_policy_digest(load_plan(plan_directory), read_selection(root, cycle_id))
+                        latest_roles = roles_for_cycle(state_path, cycle_id)
+                        latest_input = request_input(state_path, latest_roles[0]) if latest_roles else {}
+                        if latest_input.get("review_engine") and latest_input["review_engine"] != _review_engine_version():
+                            return "review_engine_changed"
+                        return _apl_acceptance_policy_digest(load_plan(plan_directory), read_selection(root, cycle_id),
+                            latest_roles[1] if latest_roles else None,
+                            latest_input.get("review_policy"), latest_input.get("review_engine"))
 
                 executor = CodexAuthorizedJobExecutor(
                     adapter=adapter, runtime=_configured_runtime(root / ".agentflow" / "runs", args),
@@ -681,6 +1079,29 @@ def main(argv: list[str] | None = None) -> int:
                     plan=plan, workspace=root_real, authorized_scope=snapshot.authorized_scope,
                     evidence_directory=root / ".agentflow" / "acceptance-evidence",
                     allow_unconfined_network=True))
+                if review_config and review_config["mode"] == "automatic":
+                    from .apl.code_review import ReviewedJobExecutor, ReviewAcceptanceValidator
+                    from .apl.codex_planner import CodexCLIPlannerAdapter
+                    from .git.change_tracker import GitChangeTracker
+                    from .review.contracts import ReviewPolicy
+                    from .state.review import ReviewJournal, ReviewStore
+                    from .state.roles import RoleCallJournal
+                    with ReviewStore(state_path):
+                        pass
+                    tracker = GitChangeTracker(resources.enter_context(GitLocalProvider()), root_real)
+                    review_journal = ReviewJournal(state_path)
+                    policy = ReviewPolicy(**review_config)
+                    def review_client(binding):
+                        return CodexCLIPlannerAdapter(state_path, enabled=True,
+                            timeout_seconds=min(options["planner_timeout"], policy.max_seconds),
+                            max_input_bytes=None, max_output_bytes=65536,
+                            idle_seconds=options["idle_seconds"] or None,
+                            agent_adapter=create_role_adapter(binding))
+                    executor = ReviewedJobExecutor(executor, validator, tracker, review_journal,
+                        RoleCallJournal(state_path), role_request_id, selected_roles,
+                        review_client(selected_roles.reviewer), review_client(selected_roles.executor), policy,
+                        implementation=review_engine)
+                    validator = ReviewAcceptanceValidator(validator, tracker, review_journal, implementation=review_engine)
                 resolver = LocalExecutionContractResolver(
                     contract_store=execution_store, cycle_store=store,
                     workspace_resolver=CurrentWorkspaceResolver(),
@@ -689,7 +1110,7 @@ def main(argv: list[str] | None = None) -> int:
                 controller = AuthorizedExecutionController(
                     cycle_store=store, execution_store=execution_store,
                     grant_resolver=resolver, executor=executor,
-                    evidence_validator=validator)
+                    evidence_validator=validator, result_observer=observer)
                 local_service = LocalAuthorizedExecutionService(
                     cycle_store=store, execution_store=execution_store,
                     resolver=resolver, controller=controller,
@@ -733,6 +1154,8 @@ def main(argv: list[str] | None = None) -> int:
                     "dispatch_enabled": result["status"] in {"ready", "running"},
                     "jobs_started": result["jobs_started"],
                     "attempts": result["attempts"],
+                    **({"orchestrator_seconds": orchestrator.store.completed_decision_seconds(role_request_id)}
+                       if selected_roles else {}),
                 }, ensure_ascii=False, sort_keys=True))
                 return 0 if result["status"] == "completed" else 2
             if args.apl_command in {"handoff", "handoff-status", "handoff-resume", "handoff-cancel"}:
@@ -1147,3 +1570,5 @@ def main(argv: list[str] | None = None) -> int:
             ValueError, RuntimeError) as exc:
         print(f"Erro: {exc}", file=sys.stderr)
         return 2
+    finally:
+        resources.close()

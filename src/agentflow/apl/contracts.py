@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
+from agentflow.agents.contracts import Cancellation
 
 
 class APLState(StrEnum):
@@ -51,6 +52,11 @@ class ExecutionOutcome:
     cost: float = 0
     progress_key: str = ""
     handoff: dict | None = None
+
+
+class ResultObserver(Protocol):
+    def __call__(self, cycle_id: str, job: JobProposal, outcome: ExecutionOutcome, *,
+                 remaining_seconds: float, cancellation: Cancellation, task_status: str) -> object: ...
 
 
 @dataclass(frozen=True)

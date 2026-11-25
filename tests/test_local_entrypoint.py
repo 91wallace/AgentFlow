@@ -14,7 +14,8 @@ from test_apl_initial_planning import workspace, proposed
 from agentflow.apl.initial_planning import validate_initial_plan
 
 
-def test_init_default_and_legacy_none_are_usable_without_rewriting(tmp_path, capsys):
+def test_init_default_and_legacy_none_are_usable_without_rewriting(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("agentflow.agents.discovery.discover_agents", lambda *a, **kw: [])
     root = workspace(tmp_path)
     assert main(["init", "--path", str(root)]) == 0
     target = root / ".agentflow" / "config.toml"

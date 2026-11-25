@@ -20,7 +20,7 @@ import time
 from typing import Callable, Protocol
 from uuid import uuid4
 
-from .contracts import APLState, CycleSnapshot, ExecutionOutcome, JobProposal
+from .contracts import APLState, CycleSnapshot, ExecutionOutcome, JobProposal, ResultObserver
 from .execution_contracts import (ExecutionLimits, TaskExecutionLimits,
                                   FinancialBudgetMode, FinancialBudgetPolicy)
 from .execution_identity import (attempt_id as _attempt_id,
@@ -1500,6 +1500,8 @@ class LocalAuthorizedExecutionService:
         binding = json.loads(state["binding_json"])
         if binding.get("authorization_mode") != "local_execution_contract":
             raise AuthorizedExecutionError("local_execution_contract_required")
+        if state["status"] == "completed":
+            return state
         # Revalidate before any controller continuation. Unknown task effects
         # are rejected by the existing recovery protocol and remain blocked.
         self.resolver.resolve_and_validate(state["grant_id"], state["cycle_id"])
@@ -1519,7 +1521,8 @@ class AuthorizedExecutionController:
     def __init__(self, *, cycle_store, execution_store: SQLiteAuthorizedExecutionStore,
                  grant_resolver: ExecutionGrantResolver, executor: AuthorizedJobExecutor,
                  evidence_validator: ResultEvidenceValidator, clock=None,
-                 recovery_policy: IntelligentFailureRecoveryPolicy | None = None):
+                 recovery_policy: IntelligentFailureRecoveryPolicy | None = None,
+                 result_observer: ResultObserver | None = None):
         if any(item is None for item in (cycle_store, execution_store, grant_resolver, executor, evidence_validator)):
             raise ValueError("authorized_execution_dependencies_required")
         if (not callable(getattr(grant_resolver, "resolve_and_validate", None))
@@ -1531,6 +1534,9 @@ class AuthorizedExecutionController:
         self.grants = grant_resolver
         self.executor = executor
         self.evidence = evidence_validator
+        self.result_observer = result_observer
+        if result_observer is not None and not callable(result_observer):
+            raise ValueError("result_observer_must_be_callable")
         self.clock = clock or _utc_now
         if recovery_policy is not None and not isinstance(
                 recovery_policy, IntelligentFailureRecoveryPolicy):
@@ -1591,6 +1597,7 @@ class AuthorizedExecutionController:
         if all(task["status"] == "completed" for task in state["tasks"]):
             snapshot = self.cycles.load(cycle_id)
             self._reconcile_apl_checkpoint(snapshot, state)
+            self._observe_results(run_id, snapshot, state)
             self.runs.finish(run_id, status="completed", now=self.clock())
             return self.runs.load(run_id)
         try:
@@ -1614,6 +1621,7 @@ class AuthorizedExecutionController:
                 self.runs.finish(run_id, status="cancelled", reason="operator_cancelled", now=self.clock())
                 return self.runs.load(run_id)
             completed = {task["job_id"] for task in state["tasks"] if task["status"] == "completed"}
+            self._observe_results(run_id, snapshot, state)
             if len(completed) == len(snapshot.jobs):
                 self._reconcile_apl_checkpoint(snapshot, state)
                 self.runs.finish(run_id, status="completed", now=self.clock())
@@ -1847,6 +1855,7 @@ class AuthorizedExecutionController:
                 self.runs.escalate_ifr(run_id, ready.job_id,
                                        task_state="unknown" if outcome.status == "unknown" else "failed",
                                        summary=summary, now=self.clock())
+                self._observe_results(run_id, snapshot, self.runs.load(run_id))
                 raise AuthorizedExecutionError("ifr_intervention_required")
             spent += outcome.cost
             if spent > _financial_estimate_limit(binding):
@@ -1865,6 +1874,28 @@ class AuthorizedExecutionController:
             except Exception as exc:
                 # The executor outcome is durable in the run journal; failure to update APL is recoverable from this verified checkpoint.
                 raise AuthorizedExecutionError("verified_outcome_persisted_but_cycle_checkpoint_failed") from exc
+
+    def _observe_results(self, run_id, snapshot, state):
+        if self.result_observer is None:
+            return
+        jobs = {job.job_id: job for job in snapshot.jobs}
+        for task in state["tasks"]:
+            if task["status"] not in {"completed", "failed", "unknown"} or not task["outcome_json"]:
+                continue
+            data = json.loads(task["outcome_json"])
+            outcome = ExecutionOutcome(data["status"], data["summary"], tuple(data["evidence"]),
+                                       data["cost"], data["progress_key"], data.get("handoff"))
+            try:
+                limits = json.loads(state["binding_json"])["limits"]
+                self.result_observer(snapshot.cycle_id, jobs[task["job_id"]], outcome,
+                                     remaining_seconds=max(0, limits["max_seconds"] - state["consumed_seconds"]),
+                                     cancellation=_RunCancellation(self.runs, run_id), task_status=task["status"])
+            except Exception as exc:
+                if self.runs.cancel_requested(run_id):
+                    self.runs.finish(run_id, status="cancelled", reason="operator_cancelled", now=self.clock())
+                    raise AuthorizedExecutionError("execution_cancelled_during_orchestrator") from exc
+                self.runs.finish(run_id, status="blocked", reason="orchestrator_decision_required", now=self.clock())
+                raise AuthorizedExecutionError("orchestrator_decision_required; task outcome preserved") from exc
 
     def _authorization_still_current(self, run_id: str, cycle_id: str,
                                     original: VerifiedExecutionGrant) -> bool:

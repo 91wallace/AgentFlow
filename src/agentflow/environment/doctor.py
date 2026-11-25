@@ -49,7 +49,8 @@ def diagnose(config: Config, probe: Probe = subprocess_probe,
         status, detail = probe(executable, args)
         checks.append(Check(name, required, status, detail))
     if config.effective_agent != "codex":
-        executable = {"antigravity": "agy", "claude-code": "claude", "opencode": "opencode"}[config.effective_agent]
+        executable = {"antigravity": "agy", "claude-code": "claude", "opencode": "opencode",
+                      "gemini": "gemini"}[config.effective_agent]
         status, detail = probe(executable, ("--version",))
         checks.append(Check(config.effective_agent, True, status, detail))
     return checks

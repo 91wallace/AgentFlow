@@ -77,9 +77,11 @@ class CodexCLIPlannerAdapter:
             from agentflow.agents import ExecutionPolicy, ExecutionRequest
             workspace = Path(workdir)
             self._initialize_synthetic_git_workspace(workspace)
+            prefix = getattr(self, "operation_prefix", "")
+            self.invocation_sequence = getattr(self, "invocation_sequence", 0) + 1
             request = ExecutionRequest(
                 "apl-planner", task, 1, context_digest,
-                "apl-plan-" + uuid4().hex, workspace, prompt,
+                (f"{prefix}-{self.invocation_sequence}" if prefix else "apl-plan-" + uuid4().hex), workspace, prompt,
                 ExecutionPolicy(timeout_seconds=self.timeout_seconds,
                                 log_limit_bytes=self.max_output_bytes,
                                 approval="never"),
@@ -118,6 +120,10 @@ class CodexCLIPlannerAdapter:
         if not isinstance(decoded, dict):
             raise ValueError("semantic planner response must be a JSON object")
         return decoded
+
+    def invoke_structured(self, prompt: str, task: str) -> dict:
+        """Bounded structured call, also used for execution-result decisions."""
+        return self._decode_json(self._invoke_structured(prompt, task))
 
     def plan_initial(self, context):
         """Return a constrained initial task DAG; validators derive gates locally."""

@@ -1,5 +1,38 @@
 # Arquitetura do AgentFlow
 
+## Revisão Git incremental e correção — fatia E–G
+
+A [ADR 0026](decisions/0026-git-aware-review-and-corrections.md) integra baseline
+HEAD/índice/working tree/untracked, contexto incremental, revisor selecionado e
+correções guardadas ao executor autorizado do APL. A composição permanece na
+CLI; serviços recebem provedores e journals injetados. SQLite v9 acrescenta
+eventos de revisão ligados às tarefas oficiais, sem outra máquina de execução.
+Gates independentes e estado Git exato continuam necessários à conclusão.
+Novos pedidos por papéis ativam revisão automática; pedidos antigos conservam
+seu contrato. Recuperação de intenção desconhecida continua conservadora.
+
+## Papéis por execução e delegação — Fase B
+
+A [ADR 0025](decisions/0025-execution-roles-and-delegation.md) implementa `start`
+com seleção obrigatória e persistida de orquestrador/executor/revisor. O migrador
+existente acrescenta schema SQLite v8. APL delega pelos adaptadores/runtime
+anteriores e entrega outcomes/evidências duráveis ao orquestrador por um protocolo
+de observação, sem duplicar tarefas ou permitir dispensa de gates. Intents de
+inferência incompletos não são repetidos automaticamente. O fluxo legado permanece
+compatível; MCP e worker independente continuam posteriores. A revisão foi
+acrescentada pela ADR 0026.
+
+## Evolução autônoma A–M — 2026-11-23
+
+A [ADR 0024](decisions/0024-agent-discovery-and-gemini.md) acrescenta descoberta
+agregada pelo registro existente e adaptador Gemini headless, mantendo APL como
+coordenador e o runtime de processos atual. O [inventário e progresso A–M](autonomous-platform-progress.md)
+registra os componentes reutilizáveis e as lacunas restantes. A seleção de papéis
+e a primeira delegação foram acrescentadas pela ADR 0025; a ADR 0026 implementa
+a primeira revisão/correção Git-Aware. Serviço independente, MCP e otimização
+integral continuam pendentes. A visão
+de produto não implica implementação completa.
+
 ## Contratos de execução e ausência de ciclos — M2.3
 
 A [ADR 0021](decisions/0021-apl-security-contract-boundary.md) remove o último
